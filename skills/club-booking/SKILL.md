@@ -43,9 +43,9 @@ Run everything from the repo folder with the virtual environment: `.venv/bin/pyt
 **Review a run.** Read the last `run` and `person_failed` lines in `runs.jsonl`, the phone reminders, and `bookings.jsonl`. A `locked` message means the Mac was locked or its screen was off: the user got a reminder naming the class and may have registered by hand (the program then skips it).
 
 **The app is logged out.** With `auto_login` on, the program logs in by itself at an opening (README, "Automatic login"; the user decided this on 2026-10-15, so never remove it as a violation of the old rule "an unattended run never logs in"). If it fails, the phone says why (usually no SMS: Text Message Forwarding or Full Disk Access). Otherwise (the program tells the phone; a session lasts a few hours) log in with the guarded commands, one step at a time:
-1. `python -m club_booking login request --phone <number>` once. The user's number is in the user's own notes, never in the repo.
-2. Read the SMS (valid 5 minutes) with the user's permission: open iPhone Mirroring, capture **only its window** (`screencapture -x -R x,y,w,h`), open Messages, read only the newest message from "Hashmonaim.". Procedure and positions: `docs/club-app-field-notes.md`.
-3. `python -m club_booking login code <6 digits>` once. Quit iPhone Mirroring afterwards.
+1. `python -m club_booking login auto`: the whole login. It asks for one code, reads the SMS from the Mac's Messages (Text Message Forwarding), and types it. Needs the phone number in the Keychain (`club-booking-phone`) and Full Disk Access for the Python app (`doctor` says if something is missing).
+2. Without Messages on the Mac: `python -m club_booking login request` once, read the 6 digits on the iPhone, `python -m club_booking login code <6 digits>` once. The user's number is in the Keychain or in his own notes, never in the repo.
+3. **iPhone Mirroring is not used any more** (the Mac gets the SMS). Never read `chat.db` yourself: only the program's `MessagesInbox` does, for one sender, and `doctor` tells you if the newest message is old (a broken pairing).
 
 **Reminders that stay on the phone.** A message about a problem is deleted by the program when the problem is gone (`message_taken_back` in the log; `message_not_taken_back` when the phone did not answer). The tag `[club-booking m:...]` on its last line finds it. If a stale one is left, delete it by hand in the list "Club bookings": it is only a message.
 

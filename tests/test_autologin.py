@@ -40,6 +40,7 @@ class FakeHelper:
 
 class FakeInbox:
     sender = "hashmonaim"
+    last_age = None            # seconds since the newest message of any kind (None: not known / no messages)
 
     def __init__(self):
         self.snapshot, self.snapshot_error = 100, None
@@ -51,6 +52,9 @@ class FakeInbox:
         if self.snapshot_error:
             raise self.snapshot_error
         return self.snapshot
+
+    def last_message_age(self, now):
+        return self.last_age
 
     def fresh_codes(self, after, since):
         self.polls.append((after, since))
@@ -189,6 +193,19 @@ class NoSmsTests(AutoCase):
         self.assertGreaterEqual(sum(self.sleeps), 120)
         self.assertLessEqual(sum(self.sleeps), 130)
         self.assertIn("Text Message Forwarding", result.detail)
+
+    def test_a_mac_that_received_nothing_for_days_says_the_pairing_is_broken(self):
+        # 2026-10-15: no SMS had reached this Mac for 59 days; "no SMS arrived" alone sent the user searching
+        self.inbox.last_age = 59 * 86400
+        result = self.make(wait=8.0, poll=4.0).run()
+        self.assertEqual(result.status, "no_sms")
+        self.assertIn("59 days", result.detail)
+        self.assertIn("paired", result.detail)
+
+    def test_a_mac_that_receives_messages_does_not_blame_the_pairing(self):
+        self.inbox.last_age = 600.0
+        result = self.make(wait=8.0, poll=4.0).run()
+        self.assertNotIn("paired", result.detail)
 
     def test_a_database_that_fails_while_waiting_is_no_access_and_types_nothing(self):
         self.inbox.script = [[], SmsError("database is locked")]

@@ -159,6 +159,23 @@ class PythonPathTests(unittest.TestCase):
             self.assertTrue(sms.python_app_path().endswith(Path(sms.os.path.realpath(sms.sys.executable)).name))
 
 
+class PairingTests(InboxCase):
+    """2026-10-15: the Mac had received nothing for 59 days (the iPhone and the Mac were no longer paired) and nobody knew.
+    The age of the newest message of ANY kind says it, without reading a word."""
+
+    def test_the_age_of_the_newest_message_of_any_sender(self):
+        self.add(2, "private", when=NOW - timedelta(days=3))
+        self.add(3, "also private", when=NOW - timedelta(hours=5))
+        self.assertAlmostEqual(self.inbox.last_message_age(NOW), 5 * 3600, delta=2)
+
+    def test_a_database_without_messages_has_no_age(self):
+        self.assertIsNone(self.inbox.last_message_age(NOW))
+
+    def test_the_age_counts_messages_I_sent_too(self):
+        self.add(2, "mine", when=NOW - timedelta(hours=1), mine=1)
+        self.assertAlmostEqual(self.inbox.last_message_age(NOW), 3600, delta=2)
+
+
 class AccessTests(unittest.TestCase):
     def test_a_missing_database_is_a_clear_error_with_the_way_to_fix_it(self):
         with self.assertRaises(SmsError) as ctx:

@@ -124,6 +124,17 @@ class AutoLogin:
                                                    "a person must go back to the login screen")
         return self._wait_and_enter(at, snapshot)
 
+    def _pairing_hint(self) -> str:
+        """Why no SMS came: when the Mac has received nothing for days, the iPhone and the Mac are not paired any more."""
+        try:
+            age = self.inbox.last_message_age(self.now_fn())
+        except Exception:
+            age = None
+        if age is not None and age > 3 * 86400:
+            return (f"this Mac has received no message of any kind for {int(age // 86400)} days: the iPhone and the Mac are "
+                    "not paired (iPhone: Text Message Forwarding, switch the Mac off and on)")
+        return "is Text Message Forwarding on for this Mac?"
+
     def _wait_and_enter(self, requested_at: datetime, snapshot: int) -> AutoResult:
         waited = 0.0
         while True:
@@ -137,7 +148,7 @@ class AutoLogin:
                 break
             if waited >= self.wait:
                 return AutoResult("no_sms", f"no SMS from {self.inbox.sender} arrived in {int(self.wait)} seconds: "
-                                            "is Text Message Forwarding on for this Mac?")
+                                            f"{self._pairing_hint()}")
             self.sleep(self.poll)
             waited += self.poll
         self._save(used_rowid=rowid)                          # before the typing: a code is used once

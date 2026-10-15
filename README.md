@@ -166,6 +166,8 @@ With `"write"` the calendar check is the **only** calendar writer: a booking no 
 
 ## Reading the app
 
+The screen tool `mirroir-mcp` (open source, built by `scripts/build-mirroir.sh`) only taps and takes pictures of the club app's own window on the Mac; in spite of its name it does **not** use iPhone Mirroring.
+
 The class list is read through macOS accessibility (the helper `tools/ax`, built with `scripts/build-ax.sh`): exact text, page-by-page scroll, no API call. The picture reader (Claude vision) is the fallback and still reads the confirmation dialogs. Set `"reader": "vision"` in `config.json` to use pictures only. `doctor` shows whether accessibility works.
 
 ## When something goes wrong
@@ -186,8 +188,10 @@ The class list is read through macOS accessibility (the helper `tools/ax`, built
 - Built and used on one Mac (macOS 27.2 beta, Apple silicon) for one family. **Not yet tried on a second Mac**: expect small
   problems in the first install, and please report them.
 - The **automatic login** reads the login SMS from the Mac's Messages database. That works only when Messages on the Mac
-  really receives your SMS (signed in to iMessage, Text Message Forwarding on). Check with `doctor`: "the newest message"
-  must be recent. If your Mac does not receive messages, log in by hand (`login request`, `login code`).
+  really receives your SMS (signed in to iMessage, Text Message Forwarding on and paired). Check with `doctor`: "the newest
+  message" must be recent; if it is days old, pair the iPhone and the Mac again (Text Message Forwarding: switch the Mac off and on).
+  Proven so far: a real club SMS reached the Mac and the reader found its 6-digit code. Not yet seen: the whole flow (request, read,
+  type) at a real logout. Without Messages on the Mac, log in by hand (`login request`, `login code`). iPhone Mirroring is not used.
 - `setup` finds the profile positions in the club app by itself when the person selector is open; this was written from one
   real screen, so check the positions it prints.
 - The club app's screens are read by Hebrew texts. Another club app needs new constants in `club_booking/ax_reader.py`.

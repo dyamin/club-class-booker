@@ -1799,8 +1799,11 @@ class AutoLoginTickTests(AppCase):
 
 
 class FakeInbox:
-    def __init__(self, count=2, age=3600.0, error=None):
-        self.count, self.age, self.error = count, age, error
+    def __init__(self, count=2, age=3600.0, error=None, last=60.0):
+        self.count, self.age, self.error, self.last = count, age, error, last
+
+    def last_message_age(self, now):
+        return self.last
 
     def probe(self, now):
         if self.error:
@@ -1852,6 +1855,15 @@ class AutoLoginChecksTests(AppCase):
     def test_doctor_says_when_there_is_no_message_from_the_sender_yet(self):
         out = self.doctor(FakeInbox(count=0, age=None))
         self.assertIn("no message from Hashmonaim yet", out)
+
+    def test_doctor_says_when_the_mac_has_received_nothing_for_days(self):
+        out = self.doctor(FakeInbox(count=3, age=7200.0, last=59 * 86400.0))
+        self.assertIn("FAIL  the Mac has received no message for 59 days", out)
+        self.assertIn("Text Message Forwarding", out)
+
+    def test_doctor_is_content_when_messages_arrive(self):
+        out = self.doctor(FakeInbox(count=3, age=7200.0, last=3600.0))
+        self.assertIn("OK    the Mac receives messages (the newest is 60 minutes old)", out)
 
     def test_doctor_says_how_to_fix_a_database_that_cannot_be_read(self):
         from club_booking.sms import SmsError

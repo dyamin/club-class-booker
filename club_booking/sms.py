@@ -114,6 +114,12 @@ class MessagesInbox:
         count, newest = int(rows[0][0]), rows[0][1]
         return count, (None if newest is None else (now - _when(int(newest))).total_seconds())
 
+    def last_message_age(self, now: datetime) -> Optional[float]:
+        """Seconds since the newest message of ANY kind (nothing of it is read), None when there is none. A Mac that has
+        received nothing for days is not paired with the iPhone any more (2026-10-15: 59 days without anybody knowing)."""
+        rows = self._query("SELECT MAX(date) FROM message", ())
+        return None if rows[0][0] is None else (now - _when(int(rows[0][0]))).total_seconds()
+
     def fresh_codes(self, after_rowid: int, since: datetime) -> List[Tuple[int, str]]:
         """(rowid, code) of the messages of this sender that are newer than the snapshot AND than `since`, newest first."""
         rows = self._query("SELECT m.ROWID, m.date, m.text, m.attributedBody FROM message m "

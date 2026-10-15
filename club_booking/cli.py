@@ -49,6 +49,7 @@ RETRY_ERRORED = timedelta(minutes=5)    # a run that failed (locked, logged out,
 MAX_RETRIES = 6                         # per opening: a class that never works does not keep a chain of agents alive
 OPENING_WAIT = 20 * 60                  # an opening agent waits this long for the user to unlock the Mac
 OPENING_POLL = 15                       # ... looking every 15 seconds
+PAIRING_STALE_DAYS = 14           # a Mac that has received no message for this long is not paired with the iPhone
 COUNTDOWN_IF_IDLE_BELOW = 120.0   # the "keep your hands off the mouse" banner only when the user is at the Mac
 MIN_IDLE = 600.0                 # default: a non-urgent step waits until the user has been away this long
 
@@ -1170,6 +1171,16 @@ class App:
             check(False, f"{exc}. Allow the Python.app at {python_app_path()}")
             return
         sender = self.cfg.sms_sender
+        try:
+            last = inbox.last_message_age(self.now_fn())
+        except SmsError:
+            last = None
+        if last is None or last > PAIRING_STALE_DAYS * 86400:
+            check(False, f"the Mac has received no message for {'ever' if last is None else str(int(last // 86400)) + ' days'}: "
+                         "the iPhone and the Mac are not paired. iPhone: Settings > Apps > Messages > Text Message "
+                         "Forwarding: switch the Mac off and on, then restart Messages on the Mac")
+        else:
+            check(True, f"the Mac receives messages (the newest is {_age_text(last)} old)")
         if not count:
             check(True, f"the Messages database can be read; no message from {sender} yet "
                         "(the first login SMS shows whether Text Message Forwarding works)")
