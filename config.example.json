@@ -1,0 +1,10 @@
+{
+  "people": [
+    {"key": "alex", "first_name": "Alex", "selector_row_y": 176, "calendar": "Home", "title_prefix": "", "asks_overlaps": true},
+    {"key": "sam", "first_name": "Sam", "selector_row_y": 214, "calendar": "Kids", "title_prefix": "Sam - ", "asks_overlaps": true}
+  ],
+  "calendar_audit": "write",
+  "questions": "on",
+  "questions_several": false,
+  "auto_login": false
+}
