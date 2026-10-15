@@ -190,8 +190,9 @@ The class list is read through macOS accessibility (the helper `tools/ax`, built
 - The **automatic login** reads the login SMS from the Mac's Messages database. That works only when Messages on the Mac
   really receives your SMS (signed in to iMessage, Text Message Forwarding on and paired). Check with `doctor`: "the newest
   message" must be recent; if it is days old, pair the iPhone and the Mac again (Text Message Forwarding: switch the Mac off and on).
-  Proven so far: a real club SMS reached the Mac and the reader found its 6-digit code. Not yet seen: the whole flow (request, read,
-  type) at a real logout. Without Messages on the Mac, log in by hand (`login request`, `login code`). iPhone Mirroring is not used.
+  **Proven end to end on 2026-10-15** (`login auto` after a logout): the program entered the number, asked for the code, read the SMS
+  from the Mac 4 seconds after it arrived and typed it; the whole login took 46 seconds. Not yet seen: the same at a class opening
+  (the opening agent starts it by itself). Without Messages on the Mac, log in by hand (`login request`, `login code`). iPhone Mirroring is not used.
 - `setup` finds the profile positions in the club app by itself when the person selector is open; this was written from one
   real screen, so check the positions it prints.
 - The club app's screens are read by Hebrew texts. Another club app needs new constants in `club_booking/ax_reader.py`.
