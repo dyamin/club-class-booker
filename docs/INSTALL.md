@@ -23,8 +23,8 @@ club's terms first (the program does not check them for you).
 ## 2. Install (10 minutes)
 
 ```
-git clone <the repo address> club-booking
-cd club-booking
+git clone https://github.com/dyamin/club-class-booker.git
+cd club-class-booker
 bash scripts/install.sh
 ```
 The script checks your Mac, makes the virtual environment, and builds three small helper tools. It stops with a clear message
