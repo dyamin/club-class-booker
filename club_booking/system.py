@@ -1,10 +1,12 @@
 """Questions about the Mac itself."""
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import subprocess
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 
 def screen_locked(runner: Callable = subprocess.run) -> bool:
@@ -30,6 +32,29 @@ def display_asleep() -> bool:
 def wake_display(start: Callable = subprocess.Popen) -> None:
     """Say that the user is active: the display turns on. Does not wait for the five seconds to pass."""
     start(["/usr/bin/caffeinate", "-u", "-t", "5"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@contextlib.contextmanager
+def keep_display_awake(start: Callable = subprocess.Popen, pid: int | None = None) -> Iterator[None]:
+    """Hold the display on while the program uses the screen. The wake-up above only resets the idle timer: on the
+    Sabbath of 2026-10-17 the display went dark about 30 seconds later, in the middle of a run, and the screenshots
+    failed. `caffeinate -d` holds it on; `-i` keeps the Mac from idle sleep; `-w` makes it end by itself when this
+    process dies. A hold that cannot start never stops the run (the run then fails the old way, in the log)."""
+    process = None
+    try:
+        process = start(["/usr/bin/caffeinate", "-d", "-i", "-w", str(pid if pid is not None else os.getpid())],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        process = None
+    try:
+        yield
+    finally:
+        if process is not None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:           # it ends by itself with this process (-w)
+                pass
 
 
 def screen_unavailable(locked: Callable[[], bool] = screen_locked, asleep: Callable[[], bool] = display_asleep) -> bool:

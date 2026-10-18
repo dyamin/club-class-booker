@@ -39,7 +39,7 @@ from .sms import MessagesInbox, SmsError, python_app_path
 from .autologin import AutoLogin
 from .setup import check_mirroir_config, check_mirroir_permissions, init_mirroir_config
 from .state import LockBusy, Store
-from .system import idle_seconds, screen_unavailable, wake_if_only_asleep
+from .system import idle_seconds, keep_display_awake, screen_unavailable, wake_if_only_asleep
 from .vision import Vision, make_client
 
 GRACE = timedelta(seconds=30)    # launchd may fire a few seconds before the class opens
@@ -120,6 +120,7 @@ class App:
                  ax_factory: Callable = lambda: None,
                  audit_factory: Callable[[str], object] = lambda mode: None,
                  wake_fn: Callable[[], bool] = wake_if_only_asleep,
+                 awake_fn: Callable = keep_display_awake,
                  auto_login_factory: Optional[Callable] = None, inbox_factory: Optional[Callable] = None) -> None:
         self.cfg, self.store, self.reporter, self.agents = cfg, store, reporter, agents
         self.screen_factory, self.vision_factory, self.calendar_factory = screen_factory, vision_factory, calendar_factory
@@ -130,6 +131,7 @@ class App:
         self.login_factory, self.ax_factory = login_factory, ax_factory
         self.audit_factory = audit_factory
         self.wake_fn = wake_fn          # wakes a sleeping display; True when the screen is usable then
+        self.awake_fn = awake_fn        # context manager: holds the display on while the program uses the screen
         self.auto_login_factory = auto_login_factory    # attention -> AutoLogin; used only when cfg.auto_login is on
         self.inbox_factory = inbox_factory              # -> MessagesInbox: for the doctor and the wake-up test
 
@@ -219,7 +221,7 @@ class App:
         with self.store.run_lock():
             if countdown:
                 self._countdown()
-            with self.screen_factory() as screen:
+            with self.awake_fn(), self.screen_factory() as screen:
                 runner = Runner(self.cfg, screen, self.vision_factory(), self.store, self.calendar_factory(screen),
                                 now_fn=self.now_fn, sleep=self.sleep, dry_run=dry_run,
                                 club_app=self.club_app_factory(),
@@ -471,7 +473,7 @@ class App:
     def _apply_decisions(self, decided: List[dict], guard: bool = False, urgent: bool = False) -> None:
         applied: Set[str] = set()
         with self.store.run_lock():
-            with self.screen_factory() as screen:
+            with self.awake_fn(), self.screen_factory() as screen:
                 runner = Runner(self.cfg, screen, self.vision_factory(), self.store, self.calendar_factory(screen),
                                 now_fn=self.now_fn, sleep=self.sleep, club_app=self.club_app_factory(),
                                 attention=self._attention(urgent=urgent) if guard else None)
@@ -797,16 +799,17 @@ class App:
         (2026-10-14). With `auto_login` on, an opening that finds the login screen first logs in by itself (2026-10-15) and
         goes on at once. If that fails, or it is off, the phone is told once (with the reason); the booking runs by itself
         at the first tick after the login."""
-        kind = self._blocked_kind()
-        if kind is None:
-            return False
-        note = ""
-        if self._may_log_in_by_itself(kind, decision, dry_run):
-            result = self._log_in_by_itself()
-            if result is not None:
-                if result.ok:
-                    return False                 # logged in: no message, the run goes on in this wake-up
-                note = result.detail or result.status
+        with self.awake_fn():                    # the look and the login need the display on (2026-10-18)
+            kind = self._blocked_kind()
+            if kind is None:
+                return False
+            note = ""
+            if self._may_log_in_by_itself(kind, decision, dry_run):
+                result = self._log_in_by_itself()
+                if result is not None:
+                    if result.ok:
+                        return False             # logged in: no message, the run goes on in this wake-up
+                    note = result.detail or result.status
         names = {p.key: p.first_name for p in self.cfg.people}
         waiting = "; ".join(f"{names.get(o.person, o.person)} - {o.name}" for o in decision.due)
         self._tell_blocked(kind, waiting, note)
@@ -927,10 +930,11 @@ class App:
             if fresh:
                 lines = [f"{self.cfg.person(o.person).first_name} - {o.name}, {o.start:%a %d/%m %H:%M}"
                          for o in sorted(fresh, key=lambda o: (o.start, o.person))]
-                self._send("Club booking: the Mac is locked",
-                           "The Mac is locked or its screen is off. Open now:\n" + "\n".join(lines)
-                           + "\nRegister by hand, or unlock: it books as soon as you unlock.",
-                           "locked", sorted({o.person for o in fresh}), "")
+                self._tell_daily("locked", "Club booking: the Mac is locked",      # one a day: five openings, five
+                                 "The Mac is locked or its screen is off. Open now:\n" + "\n".join(lines)       # reminders on 2026-10-17
+                                 + "\nA class that opens while the Mac is locked is missed."
+                                 + "\nRegister by hand, or unlock: it books as soon as you unlock.",
+                                 kind="locked", persons=sorted({o.person for o in fresh}))
             if self._is_opening_agent() and not waited and not dry_run:
                 return self._wait_until_usable(dry_run, notify)
             return 0
@@ -1073,7 +1077,8 @@ class App:
             self.out("The automatic login is not available.")
             return 1
         try:
-            result = self.auto_login_factory(self._attention(urgent=True)).run()
+            with self.awake_fn():
+                result = self.auto_login_factory(self._attention(urgent=True)).run()
         except Exception as exc:
             self.out(f"Login stopped: {type(exc).__name__}: {exc}")
             return 1

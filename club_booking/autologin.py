@@ -17,6 +17,7 @@ A code screen that is not the program's own fresh request is left to a person: n
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -37,6 +38,12 @@ class AutoResult:
     @property
     def ok(self) -> bool:
         return self.status == "logged_in"
+
+
+def _masked(text: str) -> str:
+    """The reason of a failure for the log: every digit becomes "#", so that no code and no phone number is kept
+    (2026-10-17: a failure was logged without its reason, and nobody could tell what had gone wrong)."""
+    return re.sub(r"\d", "#", text)[:200]
 
 
 def _minutes(wait: timedelta) -> int:
@@ -71,7 +78,10 @@ class AutoLogin:
     # -- the attempt --------------------------------------------------------------------------------------
     def run(self) -> AutoResult:
         result = self._run()
-        self.log("auto_login", status=result.status)         # never the code, the number or a message
+        if result.ok or not result.detail:
+            self.log("auto_login", status=result.status)         # never the code, the number or a message
+        else:
+            self.log("auto_login", status=result.status, detail=_masked(result.detail))
         return result
 
     def _run(self) -> AutoResult:

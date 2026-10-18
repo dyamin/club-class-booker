@@ -14,7 +14,7 @@ from club_booking.ocr import TextHit
 from club_booking.osa import AppleScriptError, ensure_running, osa_for, run_applescript
 from club_booking.reports import Reporter
 from club_booking.system import (display_asleep, idle_seconds, screen_locked, screen_unavailable, type_into,
-                                 wake_display, wake_if_only_asleep)
+                                 keep_display_awake, wake_display, wake_if_only_asleep)
 
 TZ = ZoneInfo("Asia/Jerusalem")
 START = datetime(2026, 10, 13, 8, 50, tzinfo=TZ)
@@ -369,6 +369,47 @@ class SystemTests(unittest.TestCase):
         started = []
         wake_display(lambda cmd, **kw: started.append(cmd))
         self.assertEqual(started, [["/usr/bin/caffeinate", "-u", "-t", "5"]])
+
+    def awake(self, fail_to_start=False, run_error=None):
+        """Run keep_display_awake with a fake process starter. Returns what was started and stopped, and whether the body ran."""
+        started, stopped, ran = [], [], []
+
+        class Proc:
+            def terminate(self):
+                stopped.append(1)
+
+            def wait(self, timeout=None):
+                return 0
+
+        def start(cmd, **kw):
+            if fail_to_start:
+                raise OSError("no caffeinate")
+            started.append(cmd)
+            return Proc()
+
+        try:
+            with keep_display_awake(start, pid=4242):
+                ran.append(len(stopped))
+                if run_error:
+                    raise run_error
+        except Exception:
+            pass
+        return started, stopped, ran
+
+    def test_the_display_is_kept_on_while_a_run_goes_on(self):
+        # 2026-10-17/18: the display went dark 30 seconds after the wake-up, in the middle of a run, and the opening was lost
+        started, stopped, ran = self.awake()
+        self.assertEqual(started, [["/usr/bin/caffeinate", "-d", "-i", "-w", "4242"]])
+        self.assertEqual(ran, [0], "the hold was not released while the body ran")
+        self.assertEqual(stopped, [1], "and it is released at the end")
+
+    def test_the_display_hold_is_released_when_the_run_fails(self):
+        _, stopped, _ = self.awake(run_error=RuntimeError("boom"))
+        self.assertEqual(stopped, [1])
+
+    def test_a_display_hold_that_cannot_start_does_not_stop_the_run(self):
+        _, stopped, ran = self.awake(fail_to_start=True)
+        self.assertEqual((stopped, ran), ([], [0]))
 
     def test_a_display_probe_that_fails_means_not_asleep(self):
         # a broken probe must not crash the tick or hold the screen back for ever

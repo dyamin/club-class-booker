@@ -1,5 +1,6 @@
 import json
 import os
+import contextlib
 import tempfile
 import time
 import unittest
@@ -216,18 +217,31 @@ class AppCase(unittest.TestCase):
         self.club_app = FakeClubApp(self.fake)
         self.audit_modes, self.audit = [], FakeAudit(self.agents)
         self.wake_calls, self.wake_result = [], False
+        self.awake_depth, self.awake_log = 0, []
         self.sleeps, self.on_sleep = [], None
         self.app = App(self.cfg, self.store, self.reporter, self.agents, lambda: self.screen, lambda: self.vision,
                        lambda s: self.calendar, now_fn=lambda: self.state["now"], sleep=self._sleep,
                        locked_fn=lambda: self.state["locked"], idle_fn=lambda: self.state["idle"],
                        out=self.lines.append, club_app_factory=lambda: self.club_app,
-                       audit_factory=self._audit_for, wake_fn=self._wake, running_label=running_label)
+                       audit_factory=self._audit_for, wake_fn=self._wake, running_label=running_label,
+                       awake_fn=self._awake)
         return self.app
 
     def _sleep(self, seconds):
         self.sleeps.append(seconds)
         if self.on_sleep is not None:
             self.on_sleep(len(self.sleeps))
+
+    @contextlib.contextmanager
+    def _awake(self):
+        """The display hold: records when it is on, so a test can see what happened while it was held."""
+        self.awake_depth += 1
+        self.awake_log.append("on")
+        try:
+            yield
+        finally:
+            self.awake_depth -= 1
+            self.awake_log.append("off")
 
     def _wake(self):
         """The display wake-up: it works only when a test says so (then the screen is usable)."""
@@ -1092,6 +1106,21 @@ class OpeningWaitTests(AppCase):
         self.assertNotIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
         self.assertEqual(len(self.locked_notes()), 1)
 
+    def test_a_locked_mac_is_told_once_a_day_not_once_per_class(self):
+        # 2026-10-17: five openings found the Mac locked, and the phone got five reminders for one cause
+        from club_booking.planner import Opening
+        self.due_locked()
+        self.app.cmd_tick(False, False)
+        plan = self.store.load_plan()
+        extra = Opening("sam", "2026-10-14T08:00|other", "Other", datetime(2026, 10, 14, 8, 0, tzinfo=TZ),
+                        datetime(2026, 10, 13, 8, 0, tzinfo=TZ))
+        self.store.save_plan(replace(plan, openings=plan.openings + (extra,)))
+        self.state["now"] = datetime(2026, 10, 13, 8, 0, 10, tzinfo=TZ)                  # a later opening, still locked
+        self.app.cmd_tick(False, False)
+        self.assertEqual(len(self.locked_notes()), 1)
+        self.assertEqual(self.store.bump_attempt("locked|sam|2026-10-14T08:00|other"), 2,
+                         "the second opening was looked at and counted: only its message was held back")
+
     def test_the_opening_agent_also_waits_for_the_user_to_log_the_app_in(self):
         from tests.test_login import LOGGED_IN, LOGIN
         self.due_locked()
@@ -1145,6 +1174,58 @@ class OpeningWaitTests(AppCase):
         self.due_locked()
         self.app.cmd_tick(True, False)
         self.assertEqual(self.sleeps, [])
+
+
+class DisplayHoldTests(AppCase):
+    """2026-10-17/18: the display went dark about 30 seconds after the program woke it, in the middle of a run, and the
+    openings of the Sabbath were lost ("Failed to capture screenshot"). While the program uses the screen it holds the
+    display on (caffeinate -d)."""
+
+    def spy_screen(self):
+        seen, screen = [], self.screen
+
+        class Spy:
+            def __enter__(inner):
+                seen.append(self.awake_depth)
+                return screen.__enter__()
+
+            def __exit__(inner, *exc):
+                return screen.__exit__(*exc)
+        self.app.screen_factory = lambda: Spy()
+        return seen
+
+    def test_a_run_holds_the_display_on_and_lets_go_at_the_end(self):
+        self.build()
+        seen = self.spy_screen()
+        self.app.do_run([self.cfg.person("alex")], dry_run=False, countdown=False, guard=False, phone=False)
+        self.assertEqual(seen, [1], "the screen was used while the display was held")
+        self.assertEqual((self.awake_depth, self.awake_log), (0, ["on", "off"]))
+
+    def test_a_run_that_fails_still_lets_go(self):
+        self.build(screen_error=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError):
+            self.app.do_run([self.cfg.person("alex")], dry_run=False, countdown=False)
+        self.assertEqual((self.awake_depth, self.awake_log), (0, ["on", "off"]))
+
+    def test_the_answers_step_holds_the_display_on(self):
+        self.build()
+        seen = self.spy_screen()
+        self.app._apply_decisions([])
+        self.assertEqual(seen, [1])
+        self.assertEqual(self.awake_depth, 0)
+
+    def test_the_look_at_the_login_screen_holds_the_display_on(self):
+        from tests.test_login import LOGGED_IN
+        self.build()
+        seen = []
+
+        class Ax:
+            def dump(inner):
+                seen.append(self.awake_depth)
+                return LOGGED_IN
+        self.app.ax_factory = lambda: Ax()
+        self.app._logged_out_now(TickDecision("run_due", ("alex",), ()), False)
+        self.assertEqual(seen, [1])
 
 
 class DailyTests(AppCase):
@@ -1711,6 +1792,20 @@ class AutoLoginTickTests(AppCase):
         self.app.auto_login_factory = lambda attention: Auto()
         return looks
 
+    def test_the_display_is_held_on_during_the_login(self):
+        # 2026-10-17/18: the display went dark in the middle of the automatic login
+        self.turn_on()
+        seen = []
+
+        class Auto:
+            def run(inner):
+                seen.append(self.awake_depth)
+                self.kind = "favorites"
+                return self.AutoResult("logged_in")
+        self.app.auto_login_factory = lambda attention: Auto()
+        self.app.cmd_tick(False, False)
+        self.assertEqual(seen, [1])
+
     def test_it_is_off_by_default_and_the_old_message_is_sent(self):
         self.due()
         built = []
@@ -1915,6 +2010,19 @@ class LoginAutoCommandTests(AppCase):
         self.assertEqual(self.app.cmd_login_auto(), 0)
         self.assertIn("Logged in.", self.lines[-1])
         self.assertEqual(seen, [True])
+
+    def test_the_display_is_held_on_during_the_login(self):
+        from club_booking.autologin import AutoResult
+        self.build()
+        seen = []
+
+        class Auto:
+            def run(inner):
+                seen.append(self.awake_depth)
+                return AutoResult("logged_in")
+        self.app.auto_login_factory = lambda attention: Auto()
+        self.app.cmd_login_auto()
+        self.assertEqual((seen, self.awake_depth), ([1], 0))
 
     def test_a_failure_says_why_and_returns_one(self):
         from club_booking.autologin import AutoResult

@@ -134,6 +134,20 @@ class HappyPathTests(AutoCase):
         self.assertNotIn("123456", json.dumps(self.logs, default=str))
         self.assertNotIn("0501112233", json.dumps(self.logs, default=str))
 
+    def test_the_reason_of_a_failure_is_logged_without_digits(self):
+        # 2026-10-17 16:54: a login_error was logged with no reason, and nobody could tell what had gone wrong
+        self.helper.request_error = LoginError("the field shows 0501112233 and 123456")
+        self.assertEqual(self.make().run().status, "login_error")
+        logged = json.dumps(self.logs, default=str)
+        self.assertIn("the field shows", logged)
+        for digits in ("0501112233", "123456", "050", "1112233"):
+            self.assertNotIn(digits, logged)
+
+    def test_a_good_login_logs_no_detail(self):
+        self.inbox.script = [[(101, "123456")]]
+        self.make().run()
+        self.assertNotIn("detail", json.dumps(self.logs, default=str))
+
 
 class WhenItDoesNothingTests(AutoCase):
     def test_a_screen_that_is_not_the_login_screen_is_left_alone(self):
