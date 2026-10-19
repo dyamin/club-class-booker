@@ -97,6 +97,7 @@ The program asks you on the iPhone in the Reminders list "Club bookings": **one 
 | A person who asks (`"asks": true`, Alex) has several classes in one day | Books them all, then asks. | Keep: each class / Keep all |
 | Two classes of that person overlap | Books only the **more crowded** one (the people who registered are counted on the class page; the earlier class when it cannot count) and asks. | Keep: the booked one / Switch to: the other |
 | Two classes of a person with `"asks_overlaps": true` (in `config.json`) overlap | Books the more crowded one, then asks. The club refuses two overlapping classes ("לא ניתן להירשם לשני שיעורים חופפים", seen 2026-10-15 with Sam's chess and football at 13:15). Several classes in one day are **not** asked about for the sons. | Keep: X / Switch to: Y |
+| The club refuses a class for the person's **age** (`"age_refusal_ok": true` in `config.json`: the club lets this person in anyway, so the refusal is no problem) | Marks the class as refused (never tried again), sends **no** message, and gives the class a **calendar event** as if it were booked. It stays in the favorites; the program never changes favorites. Without the flag the refusal is a "to check" message. (Seen 2026-10-18: "כניסה מותרת מגיל 4" for a child of 4.) | none |
 
 ### How you answer (two-way, no Claude session needed)
 

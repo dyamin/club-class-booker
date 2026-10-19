@@ -330,6 +330,21 @@ class DroppedClassTests(AuditCase):
         self.assertIn(self.ident, self.store.calendar_dropped())
         self.assertEqual((self.osa.calls, self.osa.deleted), ([], []), "no Calendar call at all")
 
+    def test_a_kept_class_is_never_noted_or_deleted(self):
+        # 2026-10-19: a class the club refused for age but the person attends anyway is on no booked tab
+        self.world()
+        for _ in range(3):
+            self.assertEqual(self.audit_obj.remove_dropped([(SAM, [])], keep={self.ident}), [])
+            self.later(31)
+        self.assertEqual((self.store.calendar_dropped(), self.osa.deleted), ({}, []))
+
+    def test_a_kept_class_that_was_noted_before_is_cleared(self):
+        self.world()
+        self.look()                                       # noted as missing
+        self.later(31)
+        self.audit_obj.remove_dropped([(SAM, [])], keep={self.ident})
+        self.assertEqual(self.store.calendar_dropped(), {})
+
     def test_the_second_reading_half_an_hour_later_deletes_the_event(self):
         self.world()
         uid = self.osa.events[0][1].uid

@@ -53,6 +53,8 @@ Run everything from the repo folder with the virtual environment: `.venv/bin/pyt
 
 **A full class.** The program joins the waitlist and keeps the spot, with no question and no phone message (the user's decision of 2026-10-14; `waitlisted` in `bookings.jsonl`). Never remove a waitlist spot for the user: they do it in the club app.
 
+**A class the club refuses for age.** For a person with `"age_refusal_ok": true` in `config.json` (Robin: the club lets him in although the pop-up says "כניסה מותרת מגיל 4", the user's decision of 2026-10-19) the refusal is no problem: the outcome is `age_refused` (console and log, nothing for the phone), the class is never tried again, and the calendar audit gives it an event as if it were registered. It stays in the favorites (the user asked for that; never remove it). Without the flag a refusal is a "to check" message. Do not try to register such a class again by hand: the club answers the same.
+
 **A class the user unregistered.** The program does not book that date again, and it deletes the calendar event it made, after two readings 30 minutes apart (`calendar_audit_removed` in the log). Never delete a calendar event by hand-made script: Calendar scripting cannot delete a repeating event (it does nothing, without an error), and the program's own delete refuses a series. The rules are in `club_booking/calendar_audit.py` (`remove_dropped`).
 
 **What the phone gets.** Only a decision (questions) or an action (a class not booked, the locked Mac, a logged-out app, giving up, a crash). Never a confirmation, a waitlist join, a calendar message or the wake-up test (the user's rule of 2026-10-15). Everything else is in `runs.jsonl`. Do not add a phone message for information.

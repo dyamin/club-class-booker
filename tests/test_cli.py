@@ -184,9 +184,11 @@ class FakeAudit:
         self.agents, self.findings, self.error = agents, list(findings), error
         self.calls, self.armed_when_called, self.order = [], [], []
         self.removal_calls, self.removal_findings, self.removal_error = [], [], None
+        self.states, self.keep_calls = [], []
 
-    def remove_dropped(self, entries):
+    def remove_dropped(self, entries, keep=()):
         self.order.append("remove")
+        self.keep_calls.append(set(keep))
         self.removal_calls.append([(p.key, [c.key for c in cards]) for p, cards in entries])
         if self.removal_error:
             raise self.removal_error
@@ -195,6 +197,7 @@ class FakeAudit:
     def check_all(self, entries, horizon_days):
         self.order.append("add")
         self.calls.append(([(p.key, [c.key for c in cards]) for p, cards in entries], horizon_days))
+        self.states.append({(p.key, c.key): c.state for p, cards in entries for c in cards})
         self.armed_when_called.append(len(self.agents.armed))
         if self.error:
             raise self.error
@@ -2475,6 +2478,49 @@ class CalendarAuditWiringTests(AppCase):
                                  PersonResult("robin", cards=[])], None, [])
         self.app._audit_calendars(result, dry_run=False)
         self.assertEqual([k for k, _ in self.audit.calls[0][0]], ["alex"])
+
+    def attending(self, flag=True):
+        """Robin goes to a class that the club refuses for his age (the user's decision of 2026-10-19): the audit
+        treats such a class as one he is registered for, so that it gets a calendar event."""
+        self.build()
+        people = tuple(replace(p, age_refusal_ok=flag) if p.key == "robin" else p for p in self.app.cfg.people)
+        self.app.cfg = replace(self.app.cfg, calendar_audit="write", people=people)
+        self.refused_card = card("Capoeira", 14, 17, 20, CardState.OPEN)
+        self.other_card = card("Judo", 14, 17, 30, CardState.OPEN)
+
+    def audit_robin(self, message="כניסה מותרת מגיל 4", booked_complete=False):
+        self.store.mark_refused(f"robin|{self.refused_card.key}", message)
+        result = RunResult("r", [PersonResult("robin", cards=[self.refused_card, self.other_card], booked=[],
+                                              booked_read=booked_complete, booked_complete=booked_complete)], None, [])
+        self.app._audit_calendars(result, dry_run=False)
+
+    def test_a_class_refused_for_age_gets_an_event_when_the_person_goes_anyway(self):
+        self.attending()
+        self.audit_robin()
+        states = self.audit.states[0]
+        self.assertEqual(states[("robin", self.refused_card.key)], CardState.REGISTERED)
+        self.assertEqual(states[("robin", self.other_card.key)], CardState.OPEN, "a class that was not refused is untouched")
+
+    def test_without_the_flag_a_refused_class_gets_no_event(self):
+        self.attending(flag=False)
+        self.audit_robin()
+        self.assertEqual(self.audit.states[0][("robin", self.refused_card.key)], CardState.OPEN)
+
+    def test_a_refusal_for_overlapping_classes_gets_no_event(self):
+        self.attending()
+        self.audit_robin(message="לא ניתן להירשם לשני שיעורים חופפים")
+        self.assertEqual(self.audit.states[0][("robin", self.refused_card.key)], CardState.OPEN)
+
+    def test_such_a_class_is_kept_from_the_removal_of_unregistered_classes(self):
+        # it is on no booked tab: without this its event would be deleted as "unregistered" after two readings
+        self.attending()
+        self.audit_robin(booked_complete=True)
+        self.assertEqual(self.audit.keep_calls, [{f"robin|{self.refused_card.key}"}])
+
+    def test_nothing_is_kept_for_a_person_without_the_flag(self):
+        self.attending(flag=False)
+        self.audit_robin(booked_complete=True)
+        self.assertEqual(self.audit.keep_calls, [set()])
 
     def test_a_class_booked_by_hand_that_is_not_a_favorite_is_audited_too(self):
         # the booked tab lists every class the person is registered for; favorites list only some of them

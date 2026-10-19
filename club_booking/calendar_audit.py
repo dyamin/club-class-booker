@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, List, Optional, Sequence, Tuple
 
 from .calendar_app import CalendarError, calendar_osa
 from .config import Person
@@ -319,9 +319,12 @@ class CalendarAudit:
             self.store.mark_calendar_done(ident, card.start.strftime(_STARTED), self.now_fn())
 
     # -- a class the user unregistered ----------------------------------------------------
-    def remove_dropped(self, entries: Sequence[Tuple[Person, Sequence[ClassCard]]]) -> List[Finding]:
+    def remove_dropped(self, entries: Sequence[Tuple[Person, Sequence[ClassCard]]],
+                       keep: Collection[str] = ()) -> List[Finding]:
         """entries: for every person whose booked tab was read TO ITS END, the cards of that reading (any state).
-        A class this audit handled that is on none of them is a class the person unregistered from. Never raises."""
+        A class this audit handled that is on none of them is a class the person unregistered from. `keep` holds the
+        idents of classes that are on no booked tab on purpose (the club refused them for age, the person goes anyway):
+        they are never judged. Never raises."""
         if self.mode not in ("report", "write"):
             return []
         now = self.now_fn()
@@ -345,7 +348,7 @@ class CalendarAudit:
                     continue
                 if start <= local_now:
                     continue                          # a class that has started is history: its event stays
-                if key in present:
+                if key in present or ident in keep:
                     if write and ident in dropped:
                         self.store.clear_calendar_dropped(ident)       # it is there: the earlier reading was wrong
                     continue

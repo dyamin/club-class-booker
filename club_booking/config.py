@@ -22,6 +22,8 @@ class Person:
     title_prefix: str = ""
     asks: bool = False     # ask which class to keep when this person has several in a day or overlapping ones (R16, R17)
     asks_overlaps: bool = False    # ask only about OVERLAPPING classes (the club refuses two at once; the sons use this)
+    age_refusal_ok: bool = False   # the club refuses this person for age but lets them in: no message, and the class
+                                   # still gets a calendar event (2026-10-19)
 
 
 @dataclass(frozen=True)

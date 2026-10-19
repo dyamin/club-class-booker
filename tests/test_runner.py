@@ -8,11 +8,12 @@ from pathlib import Path
 from club_booking.models import CardState
 from club_booking.attention import Attention, GuardedScreen, UserActive
 from club_booking.runner import (USER_ACTIVE, LoggedOutError, Outcome, PersonResult, RunResult, RunError, Runner, StuckError, dialog_check,
-                                 dialog_matches, format_report)
+                                 dialog_matches, format_report, is_age_refusal)
 from club_booking.state import Store
 from club_booking.vision import DialogRead
 
-from tests.fake_app import FakeApp, FakeAxVision, FakeCalendar, FakeClubApp, FakeVision, TZ, card, make_cfg, sample_favorites
+from tests.fake_app import (FakeApp, FakeAxVision, FakeCalendar, FakeClubApp, FakeVision, PEOPLE, TZ, card, make_cfg,
+                            sample_favorites)
 
 NOW = datetime(2026, 10, 12, 18, 0, tzinfo=TZ)
 OPEN, FULL, NOT_OPEN = CardState.OPEN, CardState.FULL, CardState.NOT_OPEN
@@ -356,6 +357,43 @@ class RefusalTests(RunnerCase):
         self.assertEqual(result.people[0].error, "", "one refusal does not stop the person")
         self.assertIn("robin|2026-10-15T17:30|judo", self.store.refused())
         self.assertEqual(self.vision.popups_closed, 1)
+
+    def age_ok(self, favs=None, **kw):
+        """Robin goes to a class that the club refuses for his age (the user's decision of 2026-10-19)."""
+        people = tuple(replace(p, age_refusal_ok=True) if p.key == "robin" else p for p in PEOPLE)
+        return self.build(favs or self.FAVS, vision_cls=FakeAxVision, cfg_kw={"people": people}, **kw)
+
+    def test_an_age_refusal_of_a_person_who_goes_anyway_is_no_problem(self):
+        # 2026-10-19: the club refuses Robin ("entry from age 4") but lets him in; the class belongs in his calendar
+        runner = self.age_ok(refuse=("Judo",))
+        result = runner.run([self.cfg.person("robin")])
+        by_name = {o.name: o for o in result.people[0].outcomes}
+        self.assertEqual(by_name["Judo"].status, "age_refused")
+        self.assertEqual(by_name["Capoeira"].status, "booked")
+        self.assertEqual(result.people[0].error, "")
+        self.assertIn("robin|2026-10-15T17:30|judo", self.store.refused(), "never tried again")
+        self.assertEqual(self.vision.popups_closed, 1)
+        self.assertIsNone(format_report(self.cfg, result, problems_only=True), "nothing for the phone")
+
+    def test_the_console_says_that_the_class_was_not_registered_but_it_is_no_problem(self):
+        runner = self.age_ok(refuse=("Judo",))
+        result = runner.run([self.cfg.person("robin")])
+        title, body = format_report(self.cfg, result)
+        self.assertNotIn("to check", title)
+        self.assertIn("Not registered: Robin - Judo", body)
+        self.assertIn("goes anyway", body)
+
+    def test_an_age_refusal_of_a_person_without_the_flag_is_still_a_refusal(self):
+        runner = self.build(self.FAVS, vision_cls=FakeAxVision, refuse=("Judo",))
+        result = runner.run([self.cfg.person("robin")])
+        self.assertEqual({o.name: o.status for o in result.people[0].outcomes}["Judo"], "refused")
+        self.assertIn("to check", format_report(self.cfg, result, problems_only=True)[0])
+
+    def test_what_is_an_age_refusal(self):
+        for text in ("כניסה מותרת מגיל 4", "הגיל אינו מתאים לשיעור"):        # the real text (2026-10-18), the fake one
+            self.assertTrue(is_age_refusal(text), text)
+        for text in ("לא ניתן להירשם לשני שיעורים חופפים", "", "השיעור מלא"):
+            self.assertFalse(is_age_refusal(text), text)
 
     def test_a_refused_class_is_never_tried_again(self):
         runner = self.build(self.FAVS, vision_cls=FakeAxVision, refuse=("Judo",))

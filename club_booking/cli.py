@@ -31,7 +31,7 @@ from .questions import Question, chosen_option, decide, overlap_question, severa
 from .reports import Reporter
 from .attention import Attention, UserActive
 from .runner import (BLOCKED, LOGGED_OUT, OVERLAP_REFUSAL, USER_ACTIVE, WINDOW_HIDDEN, LoggedOutError, PersonResult, RunResult, Runner, UPDATE_NEEDED,
-                     format_report)
+                     format_report, is_age_refusal)
 from .scheduler import LaunchAgents, OPENING_PREFIX, TEST_LABEL, label_time, wake_commands
 from .screen import MirroirScreen, ScreenError
 from .secrets import SecretError, get_api_key, store_secret
@@ -645,6 +645,13 @@ class App:
             return False
         return bool(planner.due(plan.openings, self.now_fn() + AUDIT_MARGIN, self.store.handled()))
 
+    def _attending_idents(self) -> Set[str]:
+        """Classes that the club refused for age and whose person goes anyway (`age_refusal_ok`): they are on no booked
+        tab, and they still belong in the calendar."""
+        ok = {p.key for p in self.cfg.people if p.age_refusal_ok}
+        return {ident for ident, info in self.store.refused().items()
+                if ident.partition("|")[0] in ok and is_age_refusal(info.get("message", ""))}
+
     def _audit_calendars(self, result: RunResult, dry_run: bool) -> None:
         """Every class a person is registered for gets a calendar event, whoever booked it. A class the
         person unregistered from loses its event (the audit decides, and is strict: see calendar_audit.remove_dropped).
@@ -655,9 +662,12 @@ class App:
             return
         mode = "report" if dry_run else self.cfg.calendar_audit
         entries, complete = [], []
+        attending = self._attending_idents()
         for r in result.people:
-            # the favorites list and the booked tab (every class the person is registered for), each class once
-            merged = list({c.key: c for c in [*r.cards, *r.booked]}.values())
+            # the favorites list and the booked tab (every class the person is registered for), each class once. A class
+            # the club refused for age counts as registered for a person who goes anyway (2026-10-19): it gets its event
+            cards = [replace(c, state=CardState.REGISTERED) if f"{r.person}|{c.key}" in attending else c for c in r.cards]
+            merged = list({c.key: c for c in [*cards, *r.booked]}.values())
             if not r.error and merged:
                 entries.append((self.cfg.person(r.person), merged))
             if not r.error and r.booked_complete:         # judged only on a list that was read to its end
@@ -674,7 +684,7 @@ class App:
                 findings = []
                 if complete:         # FIRST the events of dropped classes: one at the same minute would count as the new class's
                     try:
-                        findings += list(audit.remove_dropped(complete))
+                        findings += list(audit.remove_dropped(complete, keep=attending))
                     except LockBusy:
                         raise
                     except Exception as exc:                  # the events that are added next are still reported

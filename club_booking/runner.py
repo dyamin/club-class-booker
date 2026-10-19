@@ -46,10 +46,16 @@ LOGGED_OUT = ("the club app is logged out. Open it and log in with your phone nu
 UPDATE_NEEDED = ("the club app needs an update (a popup asks for it). Update it in the App Store, open it, "
                  "and log in, then run again")
 BLOCKED = {"login": LOGGED_OUT, "code": LOGGED_OUT, "locked": LOGGED_OUT, "update": UPDATE_NEEDED}
+AGE_REFUSAL = "גיל"                         # the club: "entry from age 4" (כניסה מותרת מגיל 4, seen 2026-10-18)
 OVERLAP_REFUSAL = "שיעורים חופפים"          # the club: "you cannot register for two overlapping classes" (seen 2026-10-15)
 WINDOW_HIDDEN = ("the club app window is not visible (closed, minimized, or on another desktop): open it and the "
                  "program goes on")           # 2026-10-15: the screen tool then answers "outside the 'club' window (500x500)"
 USER_ACTIVE = "the user came back to the Mac: this run stood back"     # no failure, no message (see attention.py)
+
+
+def is_age_refusal(message: str) -> bool:
+    """True when the club's pop-up is about the person's age ("entry from age 4")."""
+    return AGE_REFUSAL in (message or "")
 
 
 @dataclass
@@ -629,6 +635,11 @@ class Runner:
             # for example Robin is not old enough for a class: remember it, close the popup, go on with the next class
             self.store.mark_refused(f"{person.key}|{card.key}", dialog.message)
             self._close_popup()
+            if person.age_refusal_ok and is_age_refusal(dialog.message):
+                # the club lets this person in anyway (the user's decision of 2026-10-19): no message; the calendar audit
+                # gives the class its event
+                return Outcome(person.key, card.name, card.start, "age_refused",
+                               f"the club's age rule ({dialog.message}); {person.first_name} goes anyway")
             return Outcome(person.key, card.name, card.start, "refused",
                            f"the club did not accept the registration ({dialog.message or 'no reason shown'}); "
                            "it will not be tried again")
@@ -894,7 +905,7 @@ def format_report(cfg: Config, result: RunResult, problems_only: bool = False) -
     2026-10-15: a message only when a decision or an action is needed, never a confirmation)."""
     names = {p.key: p.first_name for p in cfg.people}
     lines: List[str] = []
-    booked = problems = would = 0
+    booked = problems = would = age = 0
     errors: Dict[str, List[str]] = {}          # the same problem for several people is one line
     for r in result.people:
         for o in r.outcomes:
@@ -915,6 +926,10 @@ def format_report(cfg: Config, result: RunResult, problems_only: bool = False) -
                 would += 1
                 if not problems_only:
                     lines.append(f"Would book: {who} - {o.name}, {when}")
+            elif o.status == "age_refused":
+                age += 1
+                if not problems_only:        # no problem and no message: the console and the log say it
+                    lines.append(f"Not registered: {who} - {o.name}, {when} ({o.detail})")
             elif o.status == "refused":
                 problems += 1
                 lines.append(f"Refused: {who} - {o.name}, {when}: {o.detail}")
@@ -932,6 +947,7 @@ def format_report(cfg: Config, result: RunResult, problems_only: bool = False) -
         return None
     parts = ([f"{booked} booked"] if booked and not problems_only else []) + \
             ([f"{would} would be booked"] if would and not problems_only else []) + \
+            ([f"{age} not registered (age rule)"] if age and not problems_only else []) + \
             ([f"{problems} to check"] if problems else [])
     if not parts:
         return None

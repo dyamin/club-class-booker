@@ -29,7 +29,7 @@ PEOPLE = (
 
 
 def make_cfg(tmp, **over):
-    return Config(home=tmp, repo=tmp, people=PEOPLE, settle_seconds=0.0, app_restart_wait_seconds=0.0, **over)
+    return Config(home=tmp, repo=tmp, **{"people": PEOPLE, "settle_seconds": 0.0, "app_restart_wait_seconds": 0.0, **over})
 
 
 def card(name, day, hh, mm, state, month=10):
