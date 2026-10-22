@@ -800,7 +800,8 @@ class Runner:
                 self.store.mark_seen_registered(ident)     # if it shows open later, the user cancelled it: leave it
             elif card.state == CardState.FULL:
                 self.store.mark_handled(ident)
-                if self.store.bump_attempt(f"full|{ident}") == 1:
+                # a class the club refused is not tried again, and the user cannot act on "full" (2026-10-19)
+                if ident not in self.store.refused() and self.store.bump_attempt(f"full|{ident}") == 1:
                     result.outcomes.append(Outcome(person.key, card.name, card.start, "full",
                                                    "the class is full; the waitlist was not joined"))
             elif card.state == CardState.NOT_OPEN and card.opens_at <= now - timedelta(minutes=2):

@@ -215,9 +215,10 @@ class App:
         return Attention(self.idle_fn, self.now_fn, self.sleep, patient=urgent)
 
     def do_run(self, persons: Sequence[Person], dry_run: bool, countdown: bool, urgent: bool = True,
-               guard: bool = True, phone: bool = True) -> RunResult:
+               guard: bool = True, phone: bool = True, tell_blocked: bool = True) -> RunResult:
         """guard=False is for a run the user started and watches: nobody stands back for them, and phone=False: he reads
-        the result on the console, so the phone gets no message (the user's rule of 2026-10-15)."""
+        the result on the console, so the phone gets no message (the user's rule of 2026-10-15). tell_blocked=False: the
+        caller deals with a logged-out app itself (the tick logs in and runs again before it tells anyone)."""
         with self.store.run_lock():
             if countdown:
                 self._countdown()
@@ -230,13 +231,13 @@ class App:
         self.store.prune_evidence(self.cfg.keep_evidence_days)
         if dry_run:
             self.out(describe_cards(self.cfg, result))
-        self._report_run(result, dry_run, phone)
+        self._report_run(result, dry_run, phone, tell_blocked)
         self._ask_questions(result, dry_run)
         self.rearm({r.person for r in result.people if r.error and r.error != USER_ACTIVE})     # after the questions: they arm wake-ups
         self._audit_calendars(result, dry_run)       # last: a pass over a calendar takes about 20 seconds
         return result
 
-    def _report_run(self, result: RunResult, dry_run: bool, phone_too: bool = True) -> None:
+    def _report_run(self, result: RunResult, dry_run: bool, phone_too: bool = True, tell_blocked: bool = True) -> None:
         """Tell the phone what the run did. A logged-out or outdated app is not a line of the report: it is the one login
         message of the day (2026-10-15: the phone had both "Problem (Alex): the club app is logged out" and "the club
         app is logged out", two reminders for one cause)."""
@@ -256,7 +257,7 @@ class App:
                 self.store.log("report_problem", problems=problems)
         if blocked and not phone_too:
             self.out(blocked[0].error[:1].upper() + blocked[0].error[1:])        # a run by hand: the console says it
-        if blocked and not dry_run and phone_too:
+        if blocked and not dry_run and phone_too and tell_blocked:
             names = {p.key: p.first_name for p in self.cfg.people}
             self._tell_blocked("update" if any(r.error == UPDATE_NEEDED for r in blocked) else "login",
                                ", ".join(names.get(r.person, r.person) for r in blocked))
@@ -954,8 +955,13 @@ class App:
         # (replan_force_hours): nothing else wakes the program when the plan has run out, and classes would be missed.
         overdue = plan is not None and now - plan.created_at > timedelta(hours=self.cfg.replan_force_hours)
         urgent = decision.action == "run_due" or overdue
+        retry_login = decision.action == "run_due" and self.cfg.auto_login and self.auto_login_factory is not None
         try:
-            result = self.do_run(persons, dry_run=False, countdown=urgent, urgent=urgent)
+            result = self.do_run(persons, dry_run=False, countdown=urgent, urgent=urgent, tell_blocked=not retry_login)
+            if retry_login:
+                result, again = self._after_logged_out_run(decision, persons, result, urgent)
+                if again:
+                    return self._wait_until_usable(False, notify) if self._is_opening_agent() and not waited else 0
         except LockBusy:
             self.store.log("tick_busy")
             return 0
@@ -976,6 +982,22 @@ class App:
         if decision.action == "run_due" and not waited:
             self._refresh_plan_when_quiet()
         return 0
+
+    def _after_logged_out_run(self, decision: TickDecision, persons: Sequence[Person], result: RunResult,
+                              urgent: bool) -> Tuple[RunResult, bool]:
+        """A run that finds the app logged out halfway (the look before it saw a normal screen: 2026-10-20 and 21, three
+        times) logs in by itself and runs again for those people, at once: a class that opens fills in minutes, and the
+        next retry comes 5 to 12 minutes later. Nothing has been told to the phone yet (do_run was told not to).
+        Returns (the result to go on with, True when the app is still blocked: the phone was told and the caller waits)."""
+        blocked = {r.person for r in result.people if r.error in (LOGGED_OUT, UPDATE_NEEDED)}
+        if not blocked:
+            return result, False
+        if self._logged_out_now(decision):
+            return result, True                        # the login failed or is not allowed: told once, the opening agent waits
+        again = self.do_run([p for p in persons if p.key in blocked], dry_run=False, countdown=False, urgent=urgent)
+        merged = RunResult(again.run_id, [r for r in result.people if r.person not in blocked] + list(again.people),
+                           again.plan or result.plan, result.warnings)
+        return merged, False
 
     def _refresh_plan_when_quiet(self) -> None:
         """No timer wakes the program to refresh its plan. It does it here, right after an opening run: when the plan is

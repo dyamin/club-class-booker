@@ -1832,6 +1832,75 @@ class AutoLoginTickTests(AppCase):
         self.app.cmd_tick(False, False)
         self.assertTrue(any("keep your hands off" in text for _, text in self.reporter.macs))
 
+    # 2026-10-20 10:24, 2026-10-21 16:45 and 18:01: the look before the run saw a normal screen, the run found the app
+    # logged out (the person could not be switched), told the phone, and the login came 5 to 12 minutes later at the next
+    # retry. A class that opens fills in minutes.
+    def midrun(self, outcome=None):
+        """The look before the run sees a normal screen; the run finds the login screen; later looks see it too."""
+        from tests.test_login import LOGGED_IN, LOGIN
+        looks = self.due()
+        self.app.cfg = replace(self.app.cfg, auto_login=True)
+        self.fake.mode = "login"
+        test = self
+        seen = {"n": 0}
+
+        class Ax:
+            def dump(inner):
+                seen["n"] += 1
+                return LOGGED_IN if seen["n"] == 1 else LOGIN
+
+        class Auto:
+            def run(inner):
+                test.attempts.append(test.state["now"])
+                if (outcome or test.AutoResult("logged_in")).ok:
+                    test.fake.mode = "ok"
+                return outcome or test.AutoResult("logged_in")
+        self.app.ax_factory = lambda: Ax()
+        self.app.auto_login_factory = lambda attention: Auto()
+        return looks
+
+    def test_a_logged_out_app_found_during_the_run_is_logged_in_and_booked_in_the_same_wake_up(self):
+        self.midrun()
+        tells = len(self.reporter.tells)
+        self.app.cmd_tick(False, False)
+        self.assertEqual(len(self.attempts), 1)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps, "booked without waiting for the retry")
+        self.assertEqual([t for t, _ in self.reporter.tells[tells:] if "logged out" in t], [],
+                         "the phone is not told about a login that worked")
+
+    def test_the_people_who_were_done_before_the_login_screen_keep_their_result(self):
+        from club_booking.runner import LOGGED_OUT, Outcome
+        self.midrun()
+        self.app.ax_factory().dump()                    # the look before the run (the first one sees a normal screen)
+        sam_done = PersonResult("sam", outcomes=[Outcome("sam", "Judo", datetime(2026, 10, 14, 16, 45, tzinfo=TZ), "booked")])
+        result = RunResult("r1", [sam_done, PersonResult("alex", error=LOGGED_OUT)], None, [])
+        o = next(x for x in self.store.load_plan().openings if x.person == "alex")
+        decision = TickDecision("run_due", ("alex",), (o,))
+        merged, again = self.app._after_logged_out_run(decision, [self.cfg.person("sam"), self.cfg.person("alex")], result, True)
+        self.assertFalse(again)
+        self.assertIs(merged.people[0], sam_done, "Sam's result of the first run stays")
+        self.assertEqual([r.person for r in merged.people], ["sam", "alex"])
+        self.assertEqual(merged.people[1].error, "", "Alex ran again after the login")
+
+    def test_a_login_that_fails_after_a_logged_out_run_tells_the_phone_once_and_does_not_run_again(self):
+        outcome = self.AutoResult("no_sms", "no SMS from hashmonaim arrived in 120 seconds")
+        self.midrun(outcome)
+        used = self.screen.used
+        self.app.cmd_tick(False, False)
+        logged = [(t, b) for t, b in self.reporter.tells if "logged out" in t]
+        self.assertEqual(len(logged), 1)
+        self.assertIn("no SMS from hashmonaim", logged[0][1])
+        self.assertEqual(self.screen.used - used, 1, "one run only: no second run against a login screen")
+
+    def test_without_the_automatic_login_the_run_tells_the_phone_as_before(self):
+        self.midrun()
+        self.app.cfg = replace(self.app.cfg, auto_login=False)
+        used, tells = self.screen.used, len(self.reporter.tells)
+        self.app.cmd_tick(False, False)
+        self.assertEqual(len(self.attempts), 0)
+        self.assertEqual(len([t for t, _ in self.reporter.tells[tells:] if "logged out" in t]), 1)
+        self.assertEqual(self.screen.used - used, 1)
+
     def test_a_login_that_fails_tells_the_phone_why_once_and_books_nothing(self):
         self.outcome = self.AutoResult("no_sms", "no SMS from hashmonaim arrived in 120 seconds: is Text Message Forwarding on for this Mac?")
         self.turn_on()

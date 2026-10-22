@@ -395,6 +395,17 @@ class RefusalTests(RunnerCase):
         for text in ("לא ניתן להירשם לשני שיעורים חופפים", "", "השיעור מלא"):
             self.assertFalse(is_age_refusal(text), text)
 
+    def test_a_refused_class_that_shows_full_later_is_not_reported_as_full(self):
+        # 2026-10-19: the club had refused Robin's judo for his age; at 16:35 the class showed full and the phone got
+        # "the class is full; the waitlist was not joined", a message that nobody can act on
+        favs = {"alex": [], "sam": [], "robin": [card("Judo", 15, 17, 30, FULL), card("Yoga", 15, 18, 30, FULL)]}
+        runner = self.build(favs, vision_cls=FakeAxVision)
+        self.store.mark_refused("robin|2026-10-15T17:30|judo", "כניסה מותרת מגיל 4")
+        result = runner.run([self.cfg.person("robin")])
+        self.assertEqual({o.name for o in result.people[0].outcomes if o.status == "full"}, {"Yoga"},
+                         "a full class that the program has no reason to skip is still reported")
+        self.assertIn("robin|2026-10-15T17:30|judo", self.store.handled(), "and it counts as handled")
+
     def test_a_refused_class_is_never_tried_again(self):
         runner = self.build(self.FAVS, vision_cls=FakeAxVision, refuse=("Judo",))
         runner.run([self.cfg.person("robin")])
