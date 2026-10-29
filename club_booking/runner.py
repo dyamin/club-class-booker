@@ -53,6 +53,11 @@ WINDOW_HIDDEN = ("the club app window is not visible (closed, minimized, or on a
 USER_ACTIVE = "the user came back to the Mac: this run stood back"     # no failure, no message (see attention.py)
 
 
+def _window_error(exc: Exception) -> bool:
+    """The screen tool says a tap is outside the club window: the window is gone, hidden or of the wrong size."""
+    return "outside the" in str(exc) and "window" in str(exc)
+
+
 def is_age_refusal(message: str) -> bool:
     """True when the club's pop-up is about the person's age ("entry from age 4")."""
     return AGE_REFUSAL in (message or "")
@@ -691,15 +696,41 @@ class Runner:
         except Exception:
             return "unknown"
 
+    def open_app(self) -> None:
+        """Bring the club app up and to the front. The program quits it when a booking session is over (2026-10-29), so
+        it is often started here. A new app (or window) needs a moment to show its home screen, and the screen tool must
+        look for its window again."""
+        if self.club_app is None:
+            return
+        if self.club_app.activate():
+            self.sleep(self.cfg.app_start_wait_seconds)
+            self.club_app.fit()          # again: a size set at once is undone when the app restores its last size (2026-10-25)
+            self._reconnect_screen()
+
+    def _reconnect_screen(self) -> None:
+        reconnect = getattr(self.screen, "reconnect", None)
+        if reconnect is not None:
+            reconnect()           # the screen tool looks for the window of the new process, and measures it again
+
+    def _refit_window(self, reason: Exception) -> None:
+        """The screen tool says the taps are outside the window: its size is wrong (2026-10-25 and 28: 515x800, for 30 to
+        50 minutes). Open the window again if it is gone, set its size, and let the screen tool measure it again."""
+        if self.attention is not None:
+            self.attention.checkpoint()
+        self.store.log("window_refit", run_id=self.run_id, error=str(reason)[:200],
+                       windows=self.club_app.describe_windows())
+        self.club_app.activate()
+        self.club_app.fit()
+        self._reconnect_screen()
+
     def _restart_app(self, reason: Exception) -> None:
         if self.attention is not None:
             self.attention.checkpoint()
         self.store.log("app_restart", run_id=self.run_id, reason=str(reason))
         self.club_app.restart()
         self.sleep(self.cfg.app_restart_wait_seconds)
-        reconnect = getattr(self.screen, "reconnect", None)
-        if reconnect is not None:
-            reconnect()           # the screen tool looks for the window of the new process
+        self.club_app.fit()              # the app restores its last window size when it has settled
+        self._reconnect_screen()
 
     def run_person(self, person: Person) -> PersonResult:
         result = PersonResult(person.key)
@@ -708,6 +739,7 @@ class Runner:
                           | set(self.store.refused())) - self.store.chosen()      # a class the user chose is tried again
         moves = 0
         restarts = 0
+        refits = 0
         try:
             if self.cfg.questions == "on" and (person.asks or person.asks_overlaps) and not self.dry_run:
                 self._check_budget()
@@ -738,6 +770,18 @@ class Runner:
                         raise LoggedOutError(BLOCKED[kind]) from exc
                     if self._popup_open:
                         raise            # a restart can log the app out: a message that stays open is reported instead
+                    restarts += 1
+                    if restarts > self.cfg.max_app_restarts:
+                        raise
+                    self._restart_app(exc)
+                    continue
+                except ScreenError as exc:
+                    if self.club_app is None or not _window_error(exc):
+                        raise
+                    refits += 1
+                    if refits == 1:               # first the size, then one restart, then the clear message
+                        self._refit_window(exc)
+                        continue
                     restarts += 1
                     if restarts > self.cfg.max_app_restarts:
                         raise
@@ -776,7 +820,7 @@ class Runner:
             self.store.log("logged_out", run_id=self.run_id, person=person.key)
         except Exception as exc:     # one person's failure must not stop the others
             result.error = f"{type(exc).__name__}: {exc}"
-            if isinstance(exc, ScreenError) and "outside the" in str(exc) and "window" in str(exc):
+            if isinstance(exc, ScreenError) and _window_error(exc):
                 result.error = WINDOW_HIDDEN
             self.store.log("person_failed", run_id=self.run_id, person=person.key, error=result.error,
                            trace=traceback.format_exc())
@@ -853,7 +897,7 @@ class Runner:
                 self.attention.checkpoint()       # before the club app is brought to the front
             if self.club_app is not None:
                 try:
-                    self.club_app.activate()       # the first click on a window that is not in front is lost
+                    self.open_app()                # the first click on a window that is not in front is lost
                 except Exception as exc:
                     self.store.log("activate_failed", error=f"{type(exc).__name__}: {exc}")
             for person in persons:

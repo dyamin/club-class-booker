@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw
 
 from club_booking.config import Config, Person
 from club_booking.models import CardState, ClassCard
+from club_booking.screen import ScreenError
 from club_booking.vision import DialogRead, ListRead
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -29,7 +30,8 @@ PEOPLE = (
 
 
 def make_cfg(tmp, **over):
-    return Config(home=tmp, repo=tmp, **{"people": PEOPLE, "settle_seconds": 0.0, "app_restart_wait_seconds": 0.0, **over})
+    return Config(home=tmp, repo=tmp, **{"people": PEOPLE, "settle_seconds": 0.0, "app_restart_wait_seconds": 0.0,
+                                                "app_start_wait_seconds": 0.0, **over})
 
 
 def card(name, day, hh, mm, state, month=10):
@@ -119,8 +121,12 @@ class FakeApp:
         """The window region with pop-up menus: here the same picture as a screenshot."""
         return self.screenshot()
 
+    window_error = None      # text: while set, every tap fails like the screen tool does when the window has the wrong size
+
     def tap(self, x, y):
         self.taps.append((x, y))
+        if self.window_error:
+            raise ScreenError(self.window_error)
         if self.mode != "ok":
             return "tapped"
         c = self.cfg.coords
@@ -385,18 +391,44 @@ class FakeAxVision(FakeVision):
 class FakeClubApp:
     """Plays the club app's launcher. fixes: a restart cures a stuck app (it never cures the login screen)."""
 
-    def __init__(self, app, fixes=True, control_problem=""):
+    def __init__(self, app, fixes=True, control_problem="", launch_on_activate=False):
         self.app, self.fixes, self.restarts, self.activations = app, fixes, 0, 0
         self.control_problem = control_problem
+        self.launch_on_activate = launch_on_activate     # activate() had to start the app or reopen its window
+        self.quits, self.quit_result, self.quit_error, self.quit_log = 0, True, None, []
+        self.fits, self.order = 0, []
+        self.fit_cures, self.restart_cures = True, True    # what cures a window of the wrong size
 
     def can_control(self):
         return self.control_problem
 
     def activate(self):
         self.activations += 1
+        self.order.append("activate")
+        return self.launch_on_activate
+
+    def fit(self):
+        self.fits += 1
+        self.order.append("fit")
+        if self.fit_cures:
+            self.app.window_error = None
+        return True
+
+    def describe_windows(self):
+        return "2 windows: 1024x800 515x800"
+
+    def quit(self, force=False):
+        if self.quit_error:
+            raise self.quit_error
+        self.quits += 1
+        self.quit_log.append(len(self.app.button_taps))      # how many bookings were made before the quit
+        return self.quit_result
 
     def restart(self):
         self.restarts += 1
+        self.order.append("restart")
+        if self.restart_cures:
+            self.app.window_error = None
         if self.fixes and self.app.mode == "stuck":
             self.app.mode = "ok"
             self.app.sheet_open, self.app.dialog, self.app.subtab, self.app.page = False, None, "favorites", 0

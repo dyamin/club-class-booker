@@ -7,7 +7,7 @@ from pathlib import Path
 
 from club_booking.models import CardState
 from club_booking.attention import Attention, GuardedScreen, UserActive
-from club_booking.runner import (USER_ACTIVE, LoggedOutError, Outcome, PersonResult, RunResult, RunError, Runner, StuckError, dialog_check,
+from club_booking.runner import (USER_ACTIVE, WINDOW_HIDDEN, LoggedOutError, Outcome, PersonResult, RunResult, RunError, Runner, StuckError, dialog_check,
                                  dialog_matches, format_report, is_age_refusal)
 from club_booking.state import Store
 from club_booking.vision import DialogRead
@@ -335,6 +335,88 @@ class StuckAppTests(RunnerCase):
         runner = self.build(restart_app=True)
         runner.run([self.cfg.person("alex")])
         self.assertGreaterEqual(self.club_app.activations, 1)
+
+    # 2026-10-29: the program quits the club app when a session is over, so the next run often starts it again. A new
+    # app (or a new window) needs a moment to settle, and the screen tool must look for its window again.
+    def started_run(self, launched, wait=8.0):
+        runner = self.build(restart_app=True, cfg_kw={"app_start_wait_seconds": wait})
+        self.club_app.launch_on_activate = launched
+        self.sleeps = []
+        runner.sleep = self.sleeps.append
+        runner.run([self.cfg.person("alex")])
+
+    def test_a_club_app_that_was_just_started_is_waited_for_and_the_screen_tool_looks_again(self):
+        self.started_run(launched=True)
+        self.assertEqual(self.app.reconnects, 1)
+        self.assertIn(8.0, self.sleeps)
+
+    def test_a_club_app_that_was_ready_needs_no_wait_and_no_reconnect(self):
+        self.started_run(launched=False)
+        self.assertEqual(self.app.reconnects, 0)
+        self.assertNotIn(8.0, self.sleeps)
+
+    def test_the_answers_step_also_starts_the_app_through_open_app(self):
+        runner = self.build(restart_app=True, cfg_kw={"app_start_wait_seconds": 0.0})
+        self.club_app.launch_on_activate = True
+        runner.open_app()
+        self.assertEqual((self.club_app.activations, self.app.reconnects), (1, 1))
+
+    # 2026-10-25 and 28: the app came back with a window of 515x800 (it restores its last size after a quit, and a fit made
+    # at once was undone when the app finished starting). Every tap then failed with "outside the 'club' window", for
+    # 30 to 50 minutes. The size is now set again after the app has settled, and a run that meets the error sets it
+    # right once, restarts the app once, and then says so.
+    WINDOW_ERROR = "tool tap reported an error: Coordinates (520, 68) are outside the 'club' window (515x800). x must be 0-515"
+
+    def wrong_window(self, fit_cures, restart_cures):
+        runner = self.build(restart_app=True)
+        self.app.window_error = self.WINDOW_ERROR
+        self.club_app.fit_cures, self.club_app.restart_cures = fit_cures, restart_cures
+        return runner
+
+    def test_a_window_of_the_wrong_size_is_set_right_and_the_run_goes_on(self):
+        runner = self.wrong_window(fit_cures=True, restart_cures=False)
+        result = runner.run([self.cfg.person("alex")])
+        self.assertEqual(result.people[0].error, "")
+        self.assertGreaterEqual(self.club_app.fits, 1)
+        self.assertEqual(self.club_app.restarts, 0, "no restart for a window that only needed its size")
+        self.assertGreaterEqual(self.app.reconnects, 1, "the screen tool looks at the window again")
+        self.assertTrue(self.app.button_taps, "the class was booked")
+
+    def test_a_window_that_stays_wrong_is_cured_by_one_restart(self):
+        runner = self.wrong_window(fit_cures=False, restart_cures=True)
+        result = runner.run([self.cfg.person("alex")])
+        self.assertEqual(result.people[0].error, "")
+        self.assertEqual(self.club_app.restarts, 1)
+
+    def test_a_window_that_nothing_cures_ends_in_the_clear_message_after_one_refit_and_one_restart(self):
+        runner = self.wrong_window(fit_cures=False, restart_cures=False)
+        result = runner.run([self.cfg.person("alex")])
+        self.assertEqual(result.people[0].error, WINDOW_HIDDEN)
+        self.assertEqual(self.club_app.restarts, 1)
+        self.assertEqual(self.club_app.fits, 2, "one refit, then one restart (which sets the size after its wait), then it stops")
+
+    def test_the_windows_that_the_app_has_are_logged_for_the_next_look_at_the_problem(self):
+        runner = self.wrong_window(fit_cures=True, restart_cures=False)
+        runner.run([self.cfg.person("alex")])
+        lines = [json.loads(x) for x in (self.tmp / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        refit = [x for x in lines if x["event"] == "window_refit"]
+        self.assertEqual(len(refit), 1)
+        self.assertIn("515x800", refit[0]["windows"])
+
+    def test_after_a_start_the_size_is_set_again_once_the_app_has_settled(self):
+        runner = self.build(restart_app=True, cfg_kw={"app_start_wait_seconds": 8.0})
+        self.club_app.launch_on_activate = True
+        order = self.club_app.order
+        runner.sleep = lambda s: order.append("sleep")
+        runner.open_app()
+        self.assertEqual(order, ["activate", "sleep", "fit"])
+
+    def test_after_a_restart_the_size_is_set_again_once_the_app_has_settled(self):
+        runner = self.build(restart_app=True)
+        order = self.club_app.order
+        runner.sleep = lambda s: order.append("sleep")
+        runner._restart_app(RuntimeError("stuck"))
+        self.assertEqual(order, ["restart", "sleep", "fit"])
 
     def test_no_restart_when_the_run_has_no_club_app(self):
         runner = self.build(mode="stuck")

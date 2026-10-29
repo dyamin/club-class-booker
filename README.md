@@ -129,6 +129,12 @@ If the program booked a class and you unregister from it, the program does **not
 
 A locked Mac, or a Mac whose display is asleep, cannot be read or clicked (the screenshot is black and the club app's window has no size). The program checks both. When a class is due and the display is only asleep, it wakes it once; when the Mac is locked it cannot, and the phone gets a reminder that names the class so you can register by hand.
 
+## Quitting the club app after a session (`"quit_app_after_run": true`)
+
+With this setting the program quits the club app when a booking session is over: a wake-up for an opening, a `run`, or the step that applies your answers. The app does not stay open on the screen, and it no longer keeps the display awake. The login stays (tried on 2026-10-29: the app came back on its home screen, logged in), so the next session just starts the app again (`app_start_wait_seconds`, 8, for it to show its home screen; the screen tool then looks for the new window).
+
+The app is **not** quit when the user has to act in it (it is logged out, or shows the update popup), when you came back to the Mac during the session (the run stood back), in a dry run, or while another run holds the lock (that run quits it at its end). An app that does not quit is left alone: the program never kills it at the end of a session. The log says `club_app_quit` (`gone`), `club_app_quit_skipped` or `club_app_quit_failed`. It is off by default in the code and on in `config.example.json`.
+
 ## Automatic login (`"auto_login": true`)
 
 The club app logs itself out every few hours and each login needs an SMS code. You decided on 2026-10-15 that the program does the login by itself, with no Claude session ("it should be independent"). It replaces the old rule "an unattended run never logs in".

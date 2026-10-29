@@ -85,6 +85,18 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError, msg=repr(bad)):
                 load_config(p, repo)
 
+    def test_quitting_the_club_app_after_a_session_is_off_unless_asked_and_only_true_or_false_count(self):
+        p, repo = self.write({"people": self.PEOPLE})
+        cfg = load_config(p, repo)
+        self.assertEqual((cfg.quit_app_after_run, cfg.app_start_wait_seconds), (False, 8.0))
+        p, repo = self.write({"people": self.PEOPLE, "quit_app_after_run": True, "app_start_wait_seconds": 3})
+        cfg = load_config(p, repo)
+        self.assertEqual((cfg.quit_app_after_run, cfg.app_start_wait_seconds), (True, 3.0))
+        for bad in ("false", "yes", 1, None):                 # bool("false") is True: only real booleans count
+            p, repo = self.write({"people": self.PEOPLE, "quit_app_after_run": bad})
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                load_config(p, repo)
+
     def test_the_calendar_audit_is_off_unless_asked_and_a_typo_is_refused(self):
         p, repo = self.write({"people": self.PEOPLE})
         self.assertEqual(load_config(p, repo).calendar_audit, "off")

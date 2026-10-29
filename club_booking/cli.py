@@ -134,6 +134,8 @@ class App:
         self.awake_fn = awake_fn        # context manager: holds the display on while the program uses the screen
         self.auto_login_factory = auto_login_factory    # attention -> AutoLogin; used only when cfg.auto_login is on
         self.inbox_factory = inbox_factory              # -> MessagesInbox: for the doctor and the wake-up test
+        self._session_used = False       # the club app was used in this session (a run, the answers step)
+        self._session_keep_open = False  # ... and it must stay open: the user has to log in, or came back
 
     # -- messages ------------------------------------------------------------------------------
     def _send(self, title: str, body: str, kind: str, persons: Sequence[str], ident: str) -> List[str]:
@@ -228,6 +230,8 @@ class App:
                                 club_app=self.club_app_factory(),
                                 attention=self._attention(urgent) if guard else None)
                 result = runner.run(persons)
+        if not dry_run:
+            self._note_session(result)
         self.store.prune_evidence(self.cfg.keep_evidence_days)
         if dry_run:
             self.out(describe_cards(self.cfg, result))
@@ -236,6 +240,35 @@ class App:
         self.rearm({r.person for r in result.people if r.error and r.error != USER_ACTIVE})     # after the questions: they arm wake-ups
         self._audit_calendars(result, dry_run)       # last: a pass over a calendar takes about 20 seconds
         return result
+
+    def _note_session(self, result: Optional[RunResult] = None, stood_back: bool = False) -> None:
+        """The club app was used. It must stay open when the user has to act in it (logged out, an update popup) or came
+        back during the session."""
+        self._session_used = True
+        if stood_back or (result is not None and any(r.error in (LOGGED_OUT, UPDATE_NEEDED, USER_ACTIVE)
+                                                      for r in result.people)):
+            self._session_keep_open = True
+
+    def _finish_session(self) -> None:
+        """The user's request of 2026-10-29: when a booking session is over, quit the club app (its login stays: the app
+        came back on its home screen, logged in). Not while the user has to log in or update it, not when the user came
+        back during the session, not in a dry run (nothing is noted), and not under another run: that one quits at its
+        own end. Never raises."""
+        used, keep = self._session_used, self._session_keep_open
+        self._session_used = self._session_keep_open = False
+        if not used or keep or not self.cfg.quit_app_after_run:
+            return
+        club = self.club_app_factory()
+        if club is None:
+            return
+        try:
+            with self.store.run_lock():
+                gone = club.quit()
+            self.store.log("club_app_quit", gone=gone)
+        except LockBusy:
+            self.store.log("club_app_quit_skipped", reason="another run is in progress")
+        except Exception as exc:
+            self.store.log("club_app_quit_failed", error=f"{type(exc).__name__}: {exc}")
 
     def _report_run(self, result: RunResult, dry_run: bool, phone_too: bool = True, tell_blocked: bool = True) -> None:
         """Tell the phone what the run did. A logged-out or outdated app is not a line of the report: it is the one login
@@ -407,6 +440,7 @@ class App:
             self.out("Paused: remove the file PAUSE in the data folder to continue.")
             return 0
         self._process_answers(self.now_fn(), require_away=False)       # the user asked for it: no wait for them to leave
+        self._finish_session()
         waiting = [q for q in self.store.open_questions()]
         self.out(f"{len(waiting)} question(s) still open." if waiting else "No question is open.")
         return 0
@@ -480,6 +514,12 @@ class App:
                                 attention=self._attention(urgent=urgent) if guard else None)
                 stood_back = False
                 try:
+                    try:
+                        runner.open_app()               # the last session quit the app (2026-10-29)
+                    except UserActive:
+                        raise
+                    except Exception as exc:
+                        self.store.log("activate_failed", error=f"{type(exc).__name__}: {exc}")
                     for q in decided:
                         try:
                             self._apply_one(runner, q)
@@ -504,6 +544,7 @@ class App:
                             pass
                         except Exception as exc:
                             self.store.log("restore_failed", error=f"{type(exc).__name__}: {exc}")
+        self._note_session(stood_back=stood_back)
         if applied and not stood_back and self.cfg.calendar_audit == "write":
             # the calendar follows the answer: the new class gets its event, the cancelled one loses it (2026-10-15 16:10)
             try:
@@ -867,6 +908,8 @@ class App:
             self.out(f"The run stopped: {message}")
             self.store.log("run_failed", error=message, trace=traceback.format_exc())
             return 1
+        finally:
+            self._finish_session()
         return 0
 
     def cmd_tick(self, dry_run: bool, notify: bool, _waited: bool = False) -> int:
@@ -875,6 +918,8 @@ class App:
             return self._tick(dry_run, notify, _waited)
         except Exception as exc:
             return self._tick_crashed(exc, {p.key for p in self.cfg.people})
+        finally:
+            self._finish_session()
 
     def _tick_crashed(self, exc: Exception, persons: Collection[str]) -> int:
         """Log and tell once a day. Do not re-arm for a minute later: the 5-minute tick tries again."""
@@ -1108,6 +1153,13 @@ class App:
         if self.auto_login_factory is None:
             self.out("The automatic login is not available.")
             return 1
+        club = self.club_app_factory()
+        if club is not None:                           # the last session may have quit the app (2026-10-29)
+            try:
+                if club.activate():
+                    self.sleep(self.cfg.app_start_wait_seconds)
+            except Exception as exc:
+                self.store.log("activate_failed", error=f"{type(exc).__name__}: {exc}")
         try:
             with self.awake_fn():
                 result = self.auto_login_factory(self._attention(urgent=True)).run()

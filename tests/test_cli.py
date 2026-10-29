@@ -1231,6 +1231,145 @@ class DisplayHoldTests(AppCase):
         self.assertEqual(seen, [1])
 
 
+class QuitAfterSessionTests(AppCase):
+    """2026-10-29, the user's request: when a booking session is over the program quits the club app. The account stays
+    logged in (tried: the app came back on its home screen). Not while the app is needed (logged out: the user logs in),
+    not when the user came back during the session, not in a dry run."""
+
+    def due(self, quit_on=True):
+        self.build()
+        self.app.cmd_tick(False, False)                                           # plans (the flag is not on yet)
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=quit_on)
+        self.state["now"] = datetime(2026, 10, 13, 6, 0, 10, tzinfo=TZ)           # PowerGym (Alex) opens
+        for i, c in enumerate(self.fake.cards["alex"]):
+            if c.name == "PowerGym":
+                self.fake.cards["alex"][i] = replace(c, state=CardState.OPEN)
+        self.club_app.quits = 0
+        self.club_app.quit_log.clear()
+
+    def finish_with(self, *errors, flag=True):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=flag)
+        self.app._note_session(RunResult("r", [PersonResult("alex", error=e) for e in errors], None, []))
+        self.app._finish_session()
+        return self.club_app.quits
+
+    def events(self):
+        return [e["event"] for e in map(json.loads, (self.tmp / "runs.jsonl").read_text(encoding="utf-8").splitlines())]
+
+    def test_the_app_is_quit_after_the_session_that_booked(self):
+        self.due()
+        self.app.cmd_tick(False, False)
+        self.assertEqual(self.club_app.quits, 1)
+        self.assertEqual(self.club_app.quit_log, [len(self.fake.button_taps)], "every booking was made before the quit")
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+        self.assertIn("club_app_quit", self.events())
+
+    def test_it_is_off_unless_asked(self):
+        self.due(quit_on=False)
+        self.app.cmd_tick(False, False)
+        self.assertEqual(self.club_app.quits, 0)
+        self.assertTrue(self.fake.button_taps, "the class was booked")
+
+    def test_a_run_by_hand_quits_the_app_at_its_end_too(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.app.cmd_run([], False, False)
+        self.assertEqual(self.club_app.quits, 1)
+
+    def test_a_dry_run_leaves_the_app_open(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.app.cmd_run([], True, False)
+        self.assertEqual(self.club_app.quits, 0)
+
+    def test_a_tick_that_did_nothing_with_the_app_does_not_quit_it(self):
+        self.build()
+        self.app.cmd_tick(False, False)                                           # plans
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.club_app.quits = 0
+        self.app.cmd_tick(False, False)                                           # nothing is due
+        self.assertEqual(self.club_app.quits, 0)
+
+    def test_the_answers_step_quits_the_app_too(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.app._apply_decisions([])
+        self.app._finish_session()
+        self.assertEqual(self.club_app.quits, 1)
+
+    def test_the_answers_step_starts_the_app_first_because_the_last_session_quit_it(self):
+        self.build()
+        self.app._apply_decisions([])
+        self.assertGreaterEqual(self.club_app.activations, 1)
+
+    def test_a_manual_login_starts_the_app_first_and_waits_for_it(self):
+        from club_booking.autologin import AutoResult
+        self.build()
+        self.app.cfg = replace(self.app.cfg, app_start_wait_seconds=8.0)
+        self.club_app.launch_on_activate = True
+        seen = []
+
+        class Auto:
+            def run(inner):
+                seen.append(list(self.sleeps))
+                return AutoResult("logged_in")
+        self.app.auto_login_factory = lambda attention: Auto()
+        self.app.cmd_login_auto()
+        self.assertEqual(self.club_app.activations, 1)
+        self.assertIn(8.0, seen[0], "the app had its moment before the login looked at it")
+
+    def test_a_session_where_everything_went_well_quits_the_app(self):
+        self.assertEqual(self.finish_with(""), 1)
+
+    def test_a_failed_person_does_not_keep_the_app_open(self):
+        # the retry agent starts it again: an open app with a failed run is no help to anybody
+        self.assertEqual(self.finish_with("StuckError: could not switch the app to Alex"), 1)
+
+    def test_the_app_stays_open_while_the_user_has_to_log_in_or_update_it(self):
+        from club_booking.runner import LOGGED_OUT, UPDATE_NEEDED
+        self.assertEqual(self.finish_with(LOGGED_OUT), 0)
+        self.assertEqual(self.finish_with(UPDATE_NEEDED), 0)
+
+    def test_the_app_stays_open_when_the_user_came_back_during_the_session(self):
+        self.assertEqual(self.finish_with(USER_ACTIVE), 0)
+        self.assertEqual(self.finish_with("", USER_ACTIVE), 0)
+
+    def test_the_flag_off_means_no_quit(self):
+        self.assertEqual(self.finish_with("", flag=False), 0)
+
+    def test_one_quit_per_session(self):
+        self.finish_with("")
+        self.app._finish_session()
+        self.assertEqual(self.club_app.quits, 1)
+
+    def test_a_quit_that_fails_is_logged_and_never_raises(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.club_app.quit_error = RuntimeError("boom")
+        self.app._note_session(RunResult("r", [PersonResult("alex")], None, []))
+        self.app._finish_session()
+        self.assertIn("club_app_quit_failed", self.events())
+
+    def test_an_app_that_did_not_quit_is_logged_as_still_there(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.club_app.quit_result = False
+        self.app._note_session(RunResult("r", [PersonResult("alex")], None, []))
+        self.app._finish_session()
+        line = [json.loads(x) for x in (self.tmp / "runs.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual((line["event"], line["gone"]), ("club_app_quit", False))
+
+    def test_it_does_not_quit_the_app_under_another_run(self):
+        self.build()
+        self.app.cfg = replace(self.app.cfg, quit_app_after_run=True)
+        self.app._note_session(RunResult("r", [PersonResult("alex")], None, []))
+        with self.store.run_lock():                                               # another run is going on
+            self.app._finish_session()
+        self.assertEqual(self.club_app.quits, 0)
+        self.assertIn("club_app_quit_skipped", self.events())
+
+
 class DailyTests(AppCase):
     def test_a_warning_that_comes_from_two_places_is_sent_once_a_day(self):
         self.build()

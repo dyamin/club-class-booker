@@ -56,18 +56,18 @@ class ClubAppTests(unittest.TestCase):
         self.assertEqual(runner.calls[kinds(runner).index("pkill")][-2:], ["-x", "Runner"])
 
     def test_activate_brings_the_app_to_the_front(self):
-        runner = Runner()
+        runner = Runner(running_polls=99)
         self.app(runner).activate()
         front = [c for c in runner.calls if any("to activate" in part for part in c)]
         self.assertEqual(len(front), 1)
         self.assertIn("Runner 2", front[0])
-        self.assertEqual(set(kinds(runner)), {"osascript"}, "the app is only asked, nothing is opened or ended")
+        self.assertTrue({"open", "pkill"}.isdisjoint(kinds(runner)), "the app is only asked, nothing is opened or ended")
 
     def test_activate_also_sets_the_process_frontmost_because_activate_alone_failed(self):
         # 2026-10-15 (macOS 27.2 beta): `tell application ... to activate` returned without an error and the app stayed
         # behind Terminal, so the runner's taps went to another window ("could not switch the app to Alex", then a
         # restart that can end the session). `set frontmost of process ... to true` brought the app to the front.
-        runner = Runner()
+        runner = Runner(running_polls=99)
         self.app(runner).activate()
         front = [c for c in runner.calls if any("to activate" in part for part in c)][0]
         self.assertIn("set frontmost of process", " ".join(front))
@@ -188,6 +188,31 @@ class ClubAppTests(unittest.TestCase):
         app.activate()
         self.assertEqual(self.size_sets(), [])
 
+    def test_fit_says_whether_it_set_the_size(self):
+        app = self.sized("2560x1320")
+        self.assertTrue(app.fit())
+        self.assertFalse(app.fit(), "now the window has its size: nothing to set")
+
+    def test_the_windows_of_the_app_are_described_for_the_log(self):
+        def run(cmd, **kw):
+            script = " ".join(cmd)
+            if "repeat with w in windows" in script:
+                return SimpleNamespace(returncode=0, stdout="1024x800 515x800 \n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        app = ClubApp("Runner 2", "Runner", runner=run, sleep=lambda s: None)
+        self.assertEqual(app.describe_windows(), "2 windows: 1024x800 515x800")
+
+    def test_a_description_that_cannot_be_had_says_so_and_never_raises(self):
+        import subprocess
+
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 15)
+        app = ClubApp("Runner 2", "Runner", runner=run, sleep=lambda s: None)
+        self.assertEqual(app.describe_windows(), "unknown")
+        quiet = ClubApp("Runner 2", "Runner", runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+                        sleep=lambda s: None)
+        self.assertEqual(quiet.describe_windows(), "no window")
+
     def test_the_size_is_set_after_the_restart_too(self):
         app = self.sized("2560x1320")
         app.restart()
@@ -195,6 +220,67 @@ class ClubAppTests(unittest.TestCase):
         opened = [i for i, c in enumerate(self.calls) if c[0].endswith("open")]
         sets = [i for i, c in enumerate(self.calls) if "set size of window 1" in " ".join(c)]
         self.assertLess(opened[0], sets[0], "the window of the new process is the one that is set")
+
+    # 2026-10-29: the program quits the club app when a booking session is over (the user's request). The session of the
+    # account survives a quit (tried: the app came back on its home screen, logged in), but the next session must
+    # start the app again.
+    def test_quit_asks_the_app_to_quit_and_waits_for_the_end(self):
+        runner = Runner(running_polls=3)
+        self.assertTrue(self.app(runner).quit())
+        scripts = [" ".join(c) for c in runner.calls if c[0].endswith("osascript")]
+        self.assertTrue(any("to quit" in x for x in scripts))
+        self.assertNotIn("pkill", kinds(runner))
+
+    def test_an_app_that_is_not_running_is_already_quit(self):
+        runner = Runner()                                  # not running
+        self.assertTrue(self.app(runner).quit())
+        self.assertNotIn("osascript", kinds(runner))
+
+    def test_an_app_that_does_not_quit_is_left_alone_unless_it_is_forced(self):
+        runner = Runner(running_polls=999)
+        self.assertFalse(self.app(runner).quit())
+        self.assertNotIn("pkill", kinds(runner), "the end of a session never kills the app")
+        self.assertIn("pkill", kinds(self.forced()))
+
+    def forced(self):
+        runner = Runner(running_polls=999)
+        self.app(runner).quit(force=True)
+        return runner
+
+    def started(self, windows_after=1):
+        """The app is not running until `open` is called; its window shows up after that."""
+        self.calls, state = [], {"open": 0}
+
+        def run(cmd, **kw):
+            self.calls.append(list(cmd))
+            script = " ".join(cmd)
+            if cmd[0].endswith("pgrep"):
+                return SimpleNamespace(returncode=0 if state["open"] else 1, stdout="", stderr="")
+            if cmd[0].endswith("open"):
+                state["open"] += 1
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if cmd[0].endswith("osascript") and "return count of windows" in script:
+                if not state["open"]:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="no such process")
+                return SimpleNamespace(returncode=0, stdout=f"{windows_after}\n", stderr="")
+            if cmd[0].endswith("osascript") and "size of window 1" in script and "set size" not in script:
+                return SimpleNamespace(returncode=0, stdout="1024x800\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return ClubApp("Runner 2", "Runner", runner=run, sleep=lambda s: None, quit_wait=5)
+
+    def test_activate_starts_an_app_that_is_not_running_and_says_so(self):
+        app = self.started()
+        self.assertTrue(app.activate(), "the app (and so its window) is new: the caller must wait and reconnect")
+        self.assertEqual(len(self.opens()), 1)
+        front = [i for i, c in enumerate(self.calls) if any("to activate" in part for part in c)]
+        opened = [i for i, c in enumerate(self.calls) if c[0].endswith("open")]
+        self.assertLess(opened[0], front[0], "it is started before it is brought to the front")
+
+    def test_activate_says_so_when_it_had_to_reopen_the_window(self):
+        self.assertTrue(self.windowless([0, 1]).activate())
+
+    def test_activate_says_nothing_happened_when_the_app_was_ready(self):
+        self.assertFalse(self.windowless([1]).activate())
 
     def test_can_control_asks_for_the_same_two_permissions_as_activate(self):
         runner = Runner()

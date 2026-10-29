@@ -80,6 +80,8 @@ class Config:
     club_app_process: str = "Runner"
     max_app_restarts: int = 1         # per person and run: quit and open the app again when it is stuck
     app_restart_wait_seconds: float = 20.0
+    app_start_wait_seconds: float = 8.0      # after the app (or its window) was started: time to show its home screen
+    quit_app_after_run: bool = False         # quit the club app when a booking session is over (the account stays logged in)
     reader: str = "ax"                # ax = read the list through accessibility (picture reader as fallback); vision = pictures only
     ax_binary: Path = Path("tools/bin/ax")
     phone_keychain_service: str = "club-booking-phone"      # optional: the number for `login request`
@@ -110,6 +112,7 @@ _SCALARS = {
     "max_run_seconds": int, "max_person_failures": int, "max_replans_per_day": int,
     "replan_force_hours": int, "max_booking_rounds": int, "keep_evidence_days": int,
     "club_app_name": str, "club_app_process": str, "max_app_restarts": int, "app_restart_wait_seconds": float,
+    "app_start_wait_seconds": float,
     "reader": str, "phone_keychain_service": str, "calendar_audit": str, "questions": str,
     "sms_sender": str, "sms_wait_seconds": int,
 }
@@ -151,7 +154,7 @@ def load_config(path: Path, repo: Path) -> Config:
     for name in ("mirroir_binary", "ocr_binary", "ax_binary", "messages_db"):
         if name in raw:
             kwargs[name] = Path(raw[name])
-    for name in ("auto_login", "questions_several"):
+    for name in ("auto_login", "questions_several", "quit_app_after_run"):
         if name in raw:
             if not isinstance(raw[name], bool):
                 raise ConfigError(f"{name} must be true or false, not {raw[name]!r}")
