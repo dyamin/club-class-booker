@@ -1178,6 +1178,96 @@ class OpeningWaitTests(AppCase):
         self.app.cmd_tick(True, False)
         self.assertEqual(self.sleeps, [])
 
+    # 2026-11-04: Alex's Thu 08:45 class opened at 08:45 while the Mac was locked (display off 08:41 to 11:05). The agent
+    # waited 20 minutes and ended. Nothing was armed to look again, so the class stayed unbooked for hours after the user
+    # came back, although it stays open for 24 hours. A wait that ends with the Mac still locked arms the next look.
+
+    def retry_time(self):
+        from club_booking.cli import LOCKED_RETRY
+        return local_naive(self.state["now"] + LOCKED_RETRY)
+
+    def test_a_wait_that_ends_with_the_mac_still_locked_arms_the_next_look(self):
+        self.due_locked()
+        self.app.cmd_tick(False, False)
+        self.assertEqual(sum(self.sleeps), 20 * 60)
+        self.assertIn(self.retry_time(), self.agents.armed)
+        self.assertIn("locked_retry_armed", (self.tmp / "runs.jsonl").read_text())
+
+    def test_the_next_look_books_when_the_user_has_unlocked_meanwhile(self):
+        self.due_locked()
+        self.app.cmd_tick(False, False)                                           # the wait ends, still locked
+        self.state["now"] += timedelta(minutes=10)                                # the armed look fires
+        self.state["locked"] = False                                              # the user came back
+        self.sleeps.clear()
+        self.app.cmd_tick(False, False)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+        self.assertEqual(len(self.locked_notes()), 1, "the reminder once, not again")
+
+    def test_the_next_look_does_not_tell_the_phone_again_when_the_mac_is_still_locked(self):
+        self.due_locked()
+        self.app.cmd_tick(False, False)
+        self.state["now"] += timedelta(minutes=10)
+        self.app.cmd_tick(False, False)                                           # still locked
+        self.assertEqual(len(self.locked_notes()), 1)
+        self.assertIn(self.retry_time(), self.agents.armed, "and it arms the look after that")
+
+    def test_nothing_is_armed_when_the_unlock_came_in_time_and_the_class_was_booked(self):
+        self.due_locked()
+        self.unlock_after(3)
+        self.app.cmd_tick(False, False)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
+    def test_nothing_is_armed_for_a_class_the_user_registered_by_hand(self):
+        self.due_locked()
+        ident = next(o.ident for o in self.store.load_plan().openings if o.person == "alex" and o.name == "PowerGym")
+        self.store.mark_handled(ident)
+        self.app.rearm(locked=True)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
+    def test_nothing_is_armed_after_the_class_has_started(self):
+        self.due_locked()
+        last_start = max(o.start for o in self.store.load_plan().openings)
+        self.state["now"] = last_start + timedelta(minutes=5)                     # every class of the plan has started
+        self.app.rearm(locked=True)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
+    def test_a_pause_file_ends_the_chain(self):
+        self.due_locked()
+
+        def on_sleep(count):
+            if count == 2:
+                (self.tmp / "PAUSE").write_text("")
+        self.on_sleep = on_sleep
+        self.app.cmd_tick(False, False)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
+    def test_the_slow_tick_that_finds_the_mac_locked_arms_the_next_look_without_waiting(self):
+        self.due_locked(label="com.club-booking.tick")
+        self.app.cmd_tick(False, False)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn(self.retry_time(), self.agents.armed)
+
+    def test_a_dry_run_arms_no_look(self):
+        self.due_locked()
+        self.app.cmd_tick(True, False)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
+    def test_a_wait_for_the_login_that_ends_arms_no_look(self):
+        # a look would start an automatic login, and every login asks for an SMS code: that is the user's decision
+        from tests.test_login import LOGIN
+        self.due_locked()
+        self.state["locked"] = False
+
+        class Ax:
+            def dump(inner):
+                return LOGIN
+        self.app.ax_factory = lambda: Ax()
+        self.app.cfg = replace(self.app.cfg, auto_login=False)
+        self.app.cmd_tick(False, False)
+        self.assertEqual(sum(self.sleeps), 20 * 60)
+        self.assertNotIn(self.retry_time(), self.agents.armed)
+
 
 class DisplayHoldTests(AppCase):
     """2026-10-17/18: the display went dark about 30 seconds after the program woke it, in the middle of a run, and the

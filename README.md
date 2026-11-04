@@ -48,7 +48,7 @@ The program wakes **only at the time a class opens** (24 hours before it starts)
 
 - **One persistent agent per opening.** `install` puts a launchd agent in `~/Library/LaunchAgents` for every opening in the plan, for the whole week. They survive a restart. After each run the program makes them match the plan again (it adds the new openings and removes the ones that are gone).
 - **If the Mac is asleep** at that time, launchd runs the agent when the Mac wakes. To wake the Mac for the openings, run the lines that `python -m club_booking wake-command` prints once (they need an administrator; a woken Mac that is locked still needs your unlock).
-- **If the Mac is locked, or the club app is logged out,** the agent tells the phone once and waits up to 20 minutes, looking every 15 seconds, and books the moment you unlock or log in. After that it tries again every 5 minutes, at most 6 times.
+- **If the Mac is locked, or the club app is logged out,** the agent tells the phone once and waits up to 20 minutes, looking every 15 seconds, and books the moment you unlock or log in. If the Mac is still locked after the 20 minutes, the program looks again 10 minutes later, and so on (a 30-minute cycle: it watches 20 minutes of each) until the class starts, you register by hand, or you pause it. Each look waits for the unlock like the first one, so it books within seconds of your unlock (with the usual "hands off" banner), and it tells nobody. A logged-out app gets no such look (it would start an automatic login and ask for an SMS code each time): log in, or run the program by hand.
 - **A login agent** runs once when you log in (a catch-up after the Mac was off).
 - **The plan** (the list of opening times) is refreshed right after an opening run, only when it is more than two days old and you have been away for 10 minutes (a week old: always). Run `python -m club_booking run` yourself after you change a favorites list.
 - **Nothing takes the mouse** unless a class is opening, or you were away for 10 minutes (`min_idle_seconds`).
@@ -65,7 +65,7 @@ Before every click, and before it brings the club app to the front, the program 
 
 ## Run now by hand (when the Mac was locked at an opening)
 
-The agent that starts at the opening time waits up to 20 minutes for you to unlock the Mac (or log the app in) and books the moment you do; then it tries again every 5 minutes, a few times. To book at once, double-click `scripts/run-now.command` in Finder, or run `python -m club_booking run`. The window of the script waits for a key at the end, so you can read the result. A keyboard Shortcut for this was not needed (the user's decision on 2026-10-13).
+The agent that starts at the opening time waits up to 20 minutes for you to unlock the Mac (or log the app in) and books the moment you do. If the Mac stays locked, it looks again about every 30 minutes until the class starts. To book at once, double-click `scripts/run-now.command` in Finder, or run `python -m club_booking run`. The window of the script waits for a key at the end, so you can read the result. A keyboard Shortcut for this was not needed (the user's decision on 2026-10-13).
 
 Away from the Mac? The phone reminder "the Mac is locked" names the person, the class and the time. Register in the club app on your phone: the program sees "רשום" (registered) and skips that class, and it never books it again, also if you cancel it later. The calendar check (next section) adds the calendar event for it at the next run.
 
@@ -77,7 +77,7 @@ Away from the Mac? The phone reminder "the Mac is locked" names the person, the 
 |---|---|
 | Questions | A **decision**: one reminder per option (see below). |
 | `Club booking: N to check` | A class that was **not booked** and needs you: refused by the club, the class is full and the waitlist was not joined, a tap failed, a person's run failed. Only these lines, never a `Booked:` line. |
-| `the Mac is locked` | **Action:** unlock it, a class is waiting. Once per opening, naming the class. |
+| `the Mac is locked` | **Action:** unlock it, a class is waiting (it is booked as soon as you unlock, and the program looks again about every 30 minutes until the class starts). One a day, naming the class. |
 | `the club app is logged out` / `needs an update` | **Action:** log in (with `auto_login` on, only when the automatic login failed, with the reason). At most **once a day**. |
 | `giving up for today` | A class was not booked after the retries: register by hand. |
 | `<name>'s answer was only partly applied`, `answer was not applied` | Your decision could not be carried out: do that part by hand. |

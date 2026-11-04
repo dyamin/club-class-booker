@@ -49,6 +49,7 @@ RETRY_ERRORED = timedelta(minutes=5)    # a run that failed (locked, logged out,
 MAX_RETRIES = 6                         # per opening: a class that never works does not keep a chain of agents alive
 OPENING_WAIT = 20 * 60                  # an opening agent waits this long for the user to unlock the Mac
 OPENING_POLL = 15                       # ... looking every 15 seconds
+LOCKED_RETRY = timedelta(minutes=10)    # the wait ended with the Mac still locked: look again this long after it (2026-11-04)
 PAIRING_STALE_DAYS = 14           # a Mac that has received no message for this long is not paired with the iPhone
 COUNTDOWN_IF_IDLE_BELOW = 120.0   # the "keep your hands off the mouse" banner only when the user is at the Mac
 MIN_IDLE = 600.0                 # default: a non-urgent step waits until the user has been away this long
@@ -753,12 +754,21 @@ class App:
             if not dry_run:       # the calendar is no decision (the user's rule of 2026-10-15): the log, not the phone
                 self.store.log("calendar_audit_report", title=report[0], body=report[1])
 
-    def rearm(self, errored: Collection[str] = ()) -> None:
+    def rearm(self, errored: Collection[str] = (), locked: bool = False) -> None:
         """Make the opening agents match the plan: one persistent agent for EVERY future opening of any class of the
         three people, so the program wakes at each opening time and never before it. There is no timer.
 
-        A class that is due but not booked (a failed run, a locked Mac, a logged-out app) gets a retry agent a few
-        minutes later, at most MAX_RETRIES times; the failure counter (see _give_up_on_failing) ends it earlier.
+        A class that is due but not booked (a failed run, a logged-out app) gets a retry agent a few minutes later, at
+        most MAX_RETRIES times; the failure counter (see _give_up_on_failing) ends it earlier.
+
+        locked=True: the wait for an unlock ended with the Mac still locked (2026-11-04: the class stayed unbooked for
+        hours after the user came back). The class is open until it starts, so a look is armed LOCKED_RETRY later, and
+        again after that, for as long as a class is due. The chain is not counted: it ends when the class is booked,
+        handled by hand, started, or when the program is paused. A look is an opening agent like any other: it waits up
+        to 20 minutes for the unlock (a poll every 15 seconds), so the program watches about two thirds of the time, and
+        it books the moment the user unlocks, with the banner and the typing-pause guard of an urgent run. It tells
+        nobody (the reminder is once a day).
+
         Nothing is armed before `install`: the user approves the launchd agents once, and a manual run must not
         add one."""
         if not self.agents.is_installed():
@@ -772,7 +782,11 @@ class App:
         times = [local_naive(o.opens_at) for o in openings if o.ident not in handled and o.opens_at > now]
         times += self._answer_wake_times(now)
         leftover = planner.due(openings, now + GRACE, handled)
-        if leftover and max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
+        if locked and leftover:
+            at = local_naive(now + LOCKED_RETRY)
+            times.append(at)
+            self.store.log("locked_retry_armed", at=f"{at:%Y-%m-%d %H:%M}", due=[o.ident for o in leftover])
+        elif leftover and max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
             failing = any(o.person in errored for o in leftover)
             times.append(local_naive(now + (RETRY_ERRORED if failing else RETRY_SOON)))
         if times:
@@ -828,8 +842,13 @@ class App:
         """The agent that was started at an opening time found the Mac locked, or the club app logged out. It stays and
         looks every 15 seconds, up to 20 minutes, and books at once when the user unlocks or logs in (a sleeping display
         is woken). A timer would cost up to its interval, and classes fill in minutes. It stops when nothing is due any
-        more (the user registered by hand) or when the program is paused."""
+        more (the user registered by hand) or when the program is paused.
+
+        When the 20 minutes end with the Mac still locked, the next look is armed (rearm(locked=True)): without it nothing
+        looked again until some other opening woke the program (2026-11-04). A logged-out app gets no such look: it would
+        start an automatic login, and every login asks for an SMS code."""
         waited = 0
+        still_locked = False
         while waited < OPENING_WAIT:
             self.sleep(OPENING_POLL)
             waited += OPENING_POLL
@@ -838,12 +857,22 @@ class App:
             decision = decide_tick(self.store.load_plan(), self.store.handled(), self.now_fn(), self.locked_fn(),
                                    self.idle_fn(), self.cfg.replan_after_hours, min_idle=self.cfg.min_idle_seconds,
                                    force_hours=self.cfg.replan_force_hours)
+            still_locked = decision.action == "locked"
             if decision.action == "locked" and not self.wake_fn():
                 continue
             if decision.action in ("run_due", "replan") and self._blocked_kind() is not None:
                 continue
             return self.cmd_tick(dry_run, notify, _waited=True)         # usable, or nothing due any more
-        return 0                                                         # still not usable: the retry agent goes on
+        if still_locked:
+            self._arm_locked_look()
+        return 0
+
+    def _arm_locked_look(self) -> None:
+        """Arm the next look for a class that is due while the Mac is locked. Never raises (a failed arming is logged)."""
+        try:
+            self.rearm(locked=True)
+        except Exception as exc:
+            self.store.log("locked_retry_failed", error=f"{type(exc).__name__}: {exc}")
 
     def _logged_out_now(self, decision: TickDecision, dry_run: bool = False) -> bool:
         """One look at the club app before a run. When it is logged out (or needs an update) no run is started: a run would
@@ -988,11 +1017,13 @@ class App:
                          for o in sorted(fresh, key=lambda o: (o.start, o.person))]
                 self._tell_daily("locked", "Club booking: the Mac is locked",      # one a day: five openings, five
                                  "The Mac is locked or its screen is off. Open now:\n" + "\n".join(lines)       # reminders on 2026-10-17
-                                 + "\nA class that opens while the Mac is locked is missed."
-                                 + "\nRegister by hand, or unlock: it books as soon as you unlock.",
+                                 + "\nIt books as soon as you unlock, and looks again every 30 min until the class starts."
+                                 " Or register by hand.",
                                  kind="locked", persons=sorted({o.person for o in fresh}))
             if self._is_opening_agent() and not waited and not dry_run:
                 return self._wait_until_usable(dry_run, notify)
+            if not dry_run:
+                self._arm_locked_look()             # no wait here (the slow tick, or a Mac that locked again): look later
             return 0
         persons = ([self.cfg.person(k) for k in decision.persons] if decision.action == "run_due"
                    else list(self.cfg.people))
