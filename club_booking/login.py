@@ -168,7 +168,8 @@ class LoginHelper:
                 pass                                         # not there yet: look again with the old position
 
     def request_code(self, phone: str) -> str:
-        """Fill the phone number and press 'send me a code' ONCE. Returns code_screen, or unknown."""
+        """Fill the phone number and press 'send me a code' ONCE. Returns code_screen, update (the app's update popup
+        came instead), or unknown."""
         dump = self.ax.dump()
         kind = screen_kind(dump)
         if kind == "code":
@@ -202,6 +203,8 @@ class LoginHelper:
             self.guard.record_lock(self.now_fn())
             self._close_popup()
             raise LoginBlocked("the app locked the login for 10 minutes")
+        if after == "update":                   # 2026-11-05: "we need to update the app" instead of the code screen
+            return "update"
         return "unknown"
 
     def enter_code(self, code: str) -> str:

@@ -1364,6 +1364,220 @@ class OpeningWaitTests(AppCase):
         self.assertNotIn(self.login_look_time(), self.agents.armed)
 
 
+class UpdatePopupTests(AppCase):
+    """2026-11-05: the club app showed "a new version is available" and nothing could log it in. The program updates the app
+    through the App Store when a look finds the popup, quits the app and opens it again (the user's idea: a restart can
+    clear it), looks again, and tells the phone only when the popup is still there."""
+
+    due_locked = OpeningWaitTests.due_locked
+    LABEL = OpeningWaitTests.LABEL
+
+    def popup(self, store="up_to_date", restart_to="logged_in", auto_update=True, auto_login=False):
+        from club_booking.app_update import UpdateResult
+        from tests.test_login import LOGGED_IN, LOGIN, dump_of
+        self.UPDATE = dump_of("התחדשנו", "גרסה חדשה של האפליקציה זמינה להורדה. אנא עדכנו גרסה על מנת להמשיך", "לחצו לעדכון")
+        self.due_locked()
+        self.state["locked"] = False
+        self.screens, self.updates = {"kind": self.UPDATE}, []
+        after = {"logged_in": LOGGED_IN, "login": LOGIN, "update": self.UPDATE}[restart_to]
+        test, restart = self, self.club_app.restart
+
+        def restart_and_show():
+            restart()
+            test.screens["kind"] = after
+        self.club_app.restart = restart_and_show
+
+        class Ax:
+            def dump(inner):
+                return test.screens["kind"]
+
+        class Updater:
+            def run(inner):
+                test.updates.append(test.state["now"])
+                if store == "crash":
+                    raise RuntimeError("the App Store did not answer")
+                return UpdateResult(store, "the App Store has no newer version of the app" if store == "up_to_date" else "")
+        self.app.ax_factory = lambda: Ax()
+        self.app.app_update_factory = lambda: Updater()
+        self.app.cfg = replace(self.app.cfg, auto_update=auto_update, auto_login=auto_login)
+
+    def events(self):
+        return [json.loads(line) for line in (self.tmp / "runs.jsonl").read_text().splitlines()]
+
+    def update_notes(self):
+        return [(t, b) for t, b in self.reporter.tells if "update" in t]
+
+    def test_a_popup_is_updated_the_app_restarted_and_the_run_goes_on(self):
+        self.popup(store="updated")
+        self.app.cmd_tick(False, False)
+        self.assertEqual((len(self.updates), self.club_app.restarts), (1, 1))
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps, "booked in the same wake-up")
+        self.assertEqual(self.update_notes(), [], "the phone is told nothing when it is fixed")
+        self.assertEqual([e["status"] for e in self.events() if e["event"] == "app_update"], ["updated"])
+
+    def test_when_the_store_has_nothing_newer_the_app_is_still_restarted(self):
+        self.popup(store="up_to_date")
+        self.app.cmd_tick(False, False)
+        self.assertEqual(self.club_app.restarts, 1)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+        self.assertEqual([e["status"] for e in self.events() if e["event"] == "app_update"], ["up_to_date"])
+
+    def test_a_popup_that_the_restart_does_not_clear_is_told_with_the_reason(self):
+        self.popup(store="up_to_date", restart_to="update")
+        self.app.cmd_tick(False, False)
+        ((title, body),) = self.update_notes()
+        self.assertEqual(title, "Club booking: the club app needs an update")
+        self.assertIn("Automatic update did not work", body)
+        self.assertIn("no newer version", body)
+        self.assertNotIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+
+    def test_it_does_nothing_when_automatic_update_is_off(self):
+        self.popup(auto_update=False)
+        self.app.cmd_tick(False, False)
+        self.assertEqual((self.updates, self.club_app.restarts), ([], 0))
+        ((title, body),) = self.update_notes()
+        self.assertNotIn("Automatic", body)
+
+    def test_it_tries_at_most_twice_a_day(self):
+        self.popup(store="up_to_date", restart_to="update")
+        for _ in range(4):
+            self.app.cmd_tick(False, False)
+        self.assertEqual(len(self.updates), 2)
+        skipped = [e for e in self.events() if e["event"] == "app_update_skipped"]
+        self.assertTrue(skipped and "twice" in skipped[-1]["reason"], "the third and fourth look made no attempt")
+
+    def test_a_dry_run_updates_nothing(self):
+        self.popup()
+        self.app.cmd_tick(True, False)
+        self.assertEqual((self.updates, self.club_app.restarts), ([], 0))
+
+    def test_an_app_store_that_crashes_is_logged_and_the_app_is_still_restarted(self):
+        self.popup(store="crash")
+        self.app.cmd_tick(False, False)
+        self.assertIn("app_update_failed", [e["event"] for e in self.events()])
+        self.assertEqual(self.club_app.restarts, 1)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+
+    def test_a_code_request_that_ends_in_the_popup_updates_the_app_and_arms_the_next_look(self):
+        from club_booking.autologin import AutoResult
+        from tests.test_login import LOGIN
+        self.popup(restart_to="login", auto_login=True)
+        self.screens["kind"] = LOGIN                                              # the login screen; the popup comes after the press
+        test = self
+
+        class Auto:
+            def run(inner):
+                test.screens["kind"] = test.UPDATE
+                return AutoResult("update_needed", "the app asks for an update", retry_after=timedelta(minutes=45))
+        self.app.auto_login_factory = lambda attention: Auto()
+        refused_at = self.state["now"]
+        self.app.cmd_tick(False, False)
+        self.assertEqual((len(self.updates), self.club_app.restarts), (1, 1))
+        from club_booking.cli import LOGIN_LOOK_MARGIN
+        self.assertIn(local_naive(refused_at + timedelta(minutes=45) + LOGIN_LOOK_MARGIN), self.agents.synced[-1])
+
+
+class PendingLoginLookTests(AppCase):
+    """2026-11-05: the look armed for the minute the login may try again (14:43) was removed by a later arming, the
+    locked-Mac chain of 14:22, which knew nothing about it. The pending look is kept in a file, and every arming includes
+    it until it has fired or the login has worked."""
+
+    due_locked = OpeningWaitTests.due_locked
+    LABEL = OpeningWaitTests.LABEL
+    refuse_login = OpeningWaitTests.refuse_login
+
+    WAIT = timedelta(minutes=45)
+
+    def look(self):
+        from club_booking.cli import LOGIN_LOOK_MARGIN
+        return self.refused_at + self.WAIT + LOGIN_LOOK_MARGIN
+
+    def refused(self):
+        self.refuse_login(retry_after=self.WAIT)
+        self.app.cmd_tick(False, False)
+
+    def test_the_pending_look_is_kept_in_a_file(self):
+        self.refused()
+        self.assertEqual(Store(self.tmp).login_look(), self.look())
+
+    def test_a_later_arming_without_the_look_still_arms_it(self):
+        self.refused()
+        self.app.rearm(locked=True)                                               # the locked-Mac chain knows nothing about it
+        self.assertIn(local_naive(self.look()), self.agents.synced[-1])
+        self.app.rearm()
+        self.assertIn(local_naive(self.look()), self.agents.synced[-1])
+
+    def test_a_look_that_has_fired_is_forgotten(self):
+        self.refused()
+        self.state["now"] = self.look() + timedelta(minutes=1)
+        self.app.rearm()
+        self.assertNotIn(local_naive(self.look()), self.agents.synced[-1])
+        self.assertIsNone(Store(self.tmp).login_look())
+
+    def test_a_login_that_works_clears_the_pending_look(self):
+        from club_booking.autologin import AutoResult
+        self.refused()
+        self.state["now"] = self.look()
+        self.outcome = AutoResult("logged_in")
+        self.app.cmd_tick(False, False)
+        self.assertIsNone(Store(self.tmp).login_look())
+
+    def test_no_look_is_kept_for_a_class_that_is_no_longer_due(self):
+        self.refused()
+        for o in self.store.load_plan().openings:
+            self.store.mark_handled(o.ident)
+        armed_before = len(self.agents.synced)
+        self.app.rearm()
+        self.assertEqual(self.agents.synced[armed_before:], [], "nothing is due and nothing is armed, the look included")
+
+
+class FailedLoginRestartTests(AppCase):
+    """2026-11-05: after the program had quit the club app and opened it again (the user's idea), the automatic login worked
+    on its first try; before, two requests had ended with no code screen. A login that ends without a code screen now
+    restarts the club app at once, so that the next attempt starts clean. No request is made by the restart."""
+
+    due_locked = OpeningWaitTests.due_locked
+    LABEL = OpeningWaitTests.LABEL
+    refuse_login = OpeningWaitTests.refuse_login
+
+    def attempt(self, status, dry_run=False):
+        from club_booking.autologin import AutoResult
+        self.refuse_login()
+        self.outcome = AutoResult(status, "the code screen did not appear after the request", retry_after=timedelta(minutes=45))
+        self.app.cmd_tick(dry_run, False)
+
+    def restarts(self):
+        return [json.loads(line) for line in (self.tmp / "runs.jsonl").read_text().splitlines()
+                if '"app_restart"' in line]
+
+    def test_a_login_without_a_code_screen_restarts_the_app(self):
+        self.attempt("login_error")
+        self.assertEqual(self.club_app.restarts, 1)
+        self.assertIn("login", self.restarts()[-1]["reason"])
+
+    def test_a_refusal_by_the_budget_restarts_nothing(self):
+        self.attempt("budget")
+        self.assertEqual(self.club_app.restarts, 0)
+
+    def test_a_sms_that_did_not_come_restarts_nothing(self):
+        self.attempt("no_sms")
+        self.assertEqual(self.club_app.restarts, 0, "the code screen is open: a person can still use it")
+
+    def test_a_dry_run_restarts_nothing(self):
+        self.attempt("login_error", dry_run=True)
+        self.assertEqual(self.club_app.restarts, 0)
+
+    def test_a_restart_that_fails_is_logged_and_changes_nothing(self):
+        def broken():
+            raise OSError("cannot quit the app")
+        self.refuse_login()
+        from club_booking.autologin import AutoResult
+        self.outcome = AutoResult("login_error", "x", retry_after=timedelta(minutes=45))
+        self.club_app.restart = broken
+        self.app.cmd_tick(False, False)
+        self.assertIn("app_restart_failed", (self.tmp / "runs.jsonl").read_text())
+
+
 class DisplayHoldTests(AppCase):
     """2026-10-17/18: the display went dark about 30 seconds after the program woke it, in the middle of a run, and the
     openings of the Sabbath were lost ("Failed to capture screenshot"). While the program uses the screen it holds the

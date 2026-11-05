@@ -255,6 +255,12 @@ class RetryAfterTests(AutoCase):
         result = self.make().run()
         self.assertEqual((result.status, result.retry_after), ("login_error", timedelta(minutes=45)))
 
+    def test_a_code_request_that_ends_in_the_update_popup_is_update_needed(self):
+        self.helper.request_result = "update"
+        result = self.make().run()
+        self.assertEqual((result.status, result.retry_after), ("update_needed", timedelta(minutes=45)))
+        self.assertIn("update", result.detail)
+
     def test_a_login_that_worked_has_no_retry_time(self):
         self.inbox.script = [[(101, "123456")]]
         self.assertIsNone(self.make().run().retry_after)
@@ -291,6 +297,12 @@ class FailureEvidenceTests(AutoCase):
         (entry,) = self.failure_log()
         self.assertEqual((entry["status"], entry["screen"], entry["evidence"]), ("login_error", "other", "20261105-evidence.png"))
         self.assertEqual(self.pictures, ["login-login_error"])
+
+    def test_the_update_popup_keeps_evidence_too(self):
+        self.helper.request_result = "update"
+        self.make_with().run()
+        (entry,) = self.failure_log()
+        self.assertEqual(entry["status"], "update_needed")
 
     def test_no_digit_of_a_code_or_a_number_reaches_the_log(self):
         self.helper.request_result = "unknown"

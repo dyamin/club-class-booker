@@ -98,6 +98,14 @@ Facts from 2026-10-15: the Mac had received 211 SMS in the 90 days before, then 
 
 Never put the phone number in the repository. It is in the user's own notes.
 
+## The App Store page of the club app (read on 2026-11-05)
+
+- The app is an iPhone app on the Mac: `/Applications/Runner 2.app/Wrapper/iTunesMetadata.plist` holds `itemId` **1445866275** (public), `bundleShortVersionString` 70.0.11257 (the App Store shows "Version 11257, 3w ago"), developer Physical Technologies LTD.
+- `open macappstore://apps.apple.com/app/id1445866275` opens the page. The process is "App Store" (the `ax` helper reads it like the club app). The details list has one `AXButton` with the text **Open** (y about 150) when the installed version is the newest one; the button for a newer version should say **Update** (field notes of 2026-10-15; not seen again).
+- The sidebar items (Discover, Updates, ...) are an `AXCell` and an `AXButton`; `AXPress` on them **does nothing** ("the press failed" or no change). The menu bar works as a way in (`Store > Updates` is a menu item; not tried).
+- 2026-11-05: the user saw "we need to update the app" in the club app, and the App Store page said **Open**: no newer version was offered for the Mac. The popup was gone after the club app was quit and opened again (`ClubApp.restart()`, about 35 seconds with the 20-second wait), and the automatic login then worked on its first try. Whether the popup would have come back is not known.
+- Two code requests the day before had ended with "the code screen did not appear after the request" (the code request waits 25 seconds for the code screen, the locked screen or the update popup, and the popup counted as "nothing"). A live `login auto` stopped with `AxError: no such element` at the press of "send me a code". The layout does not move after the typing, and the screenshot and OCR step moves nothing (both measured).
+
 ## Update by hand
 
 The popup button "לחצו לעדכון" opens the App Store page of the app. The App Store shows an **Update** button (press it through accessibility). The app quits during the update. When the button says **Open**, open the app again. The session is lost: log in again.

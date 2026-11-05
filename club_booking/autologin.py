@@ -40,7 +40,7 @@ def budgets(home: Path):
 
 @dataclass(frozen=True)
 class AutoResult:
-    status: str      # logged_in | not_login_screen | no_access | no_phone | budget | blocked | login_error | no_sms | bad_code | stale_code_screen
+    status: str      # logged_in | not_login_screen | no_access | no_phone | budget | blocked | login_error | update_needed | no_sms | bad_code | stale_code_screen
     detail: str = ""
     retry_after: Optional[timedelta] = None     # when a request is allowed again (2026-11-05); the caller arms a look for it
 
@@ -57,8 +57,8 @@ def _masked(text: str, limit: int = 200) -> str:
 
 # The statuses after which the program may not ask again at once, and the ones after which a request was made and the
 # screen is worth a look (a refusal by the budget made no request, so there is nothing to show).
-RETRY_STATUSES = ("budget", "blocked", "login_error", "no_sms", "bad_code", "stale_code_screen")
-TRIED_STATUSES = ("login_error", "no_sms", "bad_code", "stale_code_screen")
+RETRY_STATUSES = ("budget", "blocked", "login_error", "update_needed", "no_sms", "bad_code", "stale_code_screen")
+TRIED_STATUSES = ("login_error", "update_needed", "no_sms", "bad_code", "stale_code_screen")
 APP_LOCK = timedelta(minutes=10)               # the app locks the login for 10 minutes after too many requests
 
 
@@ -174,6 +174,8 @@ class AutoLogin:
             return AutoResult("login_error", str(exc))
         except Exception as exc:                  # 2026-11-05: "AxError: no such element" ended a login as a crash, uncounted
             return AutoResult("login_error", f"{type(exc).__name__}: {exc}")
+        if shown == "update":                     # 2026-11-05: the popup came instead of the code screen
+            return AutoResult("update_needed", "the app asked for an update after the request")
         if shown != "code_screen":
             return AutoResult("login_error", "the code screen did not appear after the request")
         return self._wait_and_enter(now, snapshot)

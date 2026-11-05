@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -18,6 +19,7 @@ from . import planner
 from .calendar_app import CalendarService, calendar_names
 from .calendar_audit import CalendarAudit, format_findings
 from . import system
+from .app_update import AppStoreUpdater
 from .ax import AxClient, AxError
 from .ax_reader import AxReader, screen_kind
 from .club_app import ClubApp
@@ -50,6 +52,7 @@ MAX_RETRIES = 6                         # per opening: a class that never works 
 OPENING_WAIT = 20 * 60                  # an opening agent waits this long for the user to unlock the Mac
 OPENING_POLL = 15                       # ... looking every 15 seconds
 LOCKED_RETRY = timedelta(minutes=10)    # the wait ended with the Mac still locked: look again this long after it (2026-11-04)
+MAX_UPDATES_PER_DAY = 2                 # App Store steps per day: a popup that does not go away must not keep the program busy (2026-11-05)
 LOGIN_LOOK_MARGIN = timedelta(minutes=1)  # a look for a refused login comes this long after the budget allows a request (2026-11-05)
 PAIRING_STALE_DAYS = 14           # a Mac that has received no message for this long is not paired with the iPhone
 COUNTDOWN_IF_IDLE_BELOW = 120.0   # the "keep your hands off the mouse" banner only when the user is at the Mac
@@ -123,7 +126,8 @@ class App:
                  audit_factory: Callable[[str], object] = lambda mode: None,
                  wake_fn: Callable[[], bool] = wake_if_only_asleep,
                  awake_fn: Callable = keep_display_awake,
-                 auto_login_factory: Optional[Callable] = None, inbox_factory: Optional[Callable] = None) -> None:
+                 auto_login_factory: Optional[Callable] = None, inbox_factory: Optional[Callable] = None,
+                 app_update_factory: Optional[Callable] = None) -> None:
         self.cfg, self.store, self.reporter, self.agents = cfg, store, reporter, agents
         self.screen_factory, self.vision_factory, self.calendar_factory = screen_factory, vision_factory, calendar_factory
         self.now_fn, self.sleep, self.locked_fn, self.idle_fn = now_fn, sleep, locked_fn, idle_fn
@@ -136,6 +140,7 @@ class App:
         self.awake_fn = awake_fn        # context manager: holds the display on while the program uses the screen
         self.auto_login_factory = auto_login_factory    # attention -> AutoLogin; used only when cfg.auto_login is on
         self.inbox_factory = inbox_factory              # -> MessagesInbox: for the doctor and the wake-up test
+        self.app_update_factory = app_update_factory    # -> AppStoreUpdater; used only when cfg.auto_update is on
         self._session_used = False       # the club app was used in this session (a run, the answers step)
         self._session_keep_open = False  # ... and it must stay open: the user has to log in, or came back
         self._login_look_at: Optional[datetime] = None   # when the automatic login may try again after a refusal (2026-11-05)
@@ -317,6 +322,48 @@ class App:
             return None
         return result
 
+    def _fix_update(self) -> str:
+        """The club app shows its update popup, or the code request ended in it (2026-11-05: the user saw "we need to update
+        the app" and asked that the program updates it). Open the app's page in the App Store and press Update once when it is
+        offered, then quit the club app and open it again (the user's idea: a restart can also clear the popup). The caller
+        looks at the screen again. Returns what happened, for the phone ("" when the step was not tried). At most
+        MAX_UPDATES_PER_DAY times a day. Never raises."""
+        if not self.cfg.auto_update or self.app_update_factory is None:
+            return ""
+        day = f"{self.now_fn():%Y%m%d}"
+        if self.store.bump_attempt(f"update|{day}") > MAX_UPDATES_PER_DAY:
+            self.store.log("app_update_skipped", reason="it was tried twice today already")
+            return "the program already tried to update it twice today"
+        self._countdown()
+        self._attention(urgent=True).checkpoint()          # the user comes first: wait for a pause in their typing
+        try:
+            result = self.app_update_factory().run()
+            status, detail = result.status, result.detail
+        except Exception as exc:
+            self.store.log("app_update_failed", error=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc())
+            status, detail = "failed", f"{type(exc).__name__}: {exc}"
+        self.store.log("app_update", status=status, detail=detail)
+        restarted = self._restart_club_app("after the update step")
+        return f"App Store: {status}" + (f" ({detail})" if detail else "") + ("; the app was restarted" if restarted else "")
+
+    def _restart_club_app(self, reason: str) -> bool:
+        """Quit the club app and open it again (the user's idea of 2026-11-05: after a restart the automatic login worked on its
+        first try, where two requests before it had ended with no code screen). An update ends the app anyway; without one the
+        popup may be stale. The user comes first: wait for a pause in their typing. Never raises."""
+        club = self.club_app_factory()
+        if club is None:
+            return False
+        self._attention(urgent=True).checkpoint()
+        try:
+            club.restart()
+            self.sleep(self.cfg.app_restart_wait_seconds)
+            club.fit()
+        except Exception as exc:
+            self.store.log("app_restart_failed", error=f"{type(exc).__name__}: {exc}")
+            return False
+        self.store.log("app_restart", reason=reason)
+        return True
+
     def _tell_blocked(self, kind: str, waiting: str, note: str = "") -> None:
         """The app is logged out ("login", "code", "locked") or needs an update ("update"): one message a day, whichever
         step finds it first (the look before a run, or a run that finds it halfway)."""
@@ -325,7 +372,7 @@ class App:
                          "Club booking: the club app needs an update" if update else "Club booking: the club app is logged out",
                          f"{BLOCKED[kind].capitalize()}.\n"
                          + (f"Waiting to book: {waiting}.\n" if waiting else "")
-                         + (f"Automatic login did not work: {note}.\n" if note else "")
+                         + (f"Automatic {'update' if update else 'login'} did not work: {note}.\n" if note else "")
                          + "The booking runs by itself right after you have fixed it.",
                          kind="update" if update else "login")
 
@@ -788,6 +835,12 @@ class App:
         times = [local_naive(o.opens_at) for o in openings if o.ident not in handled and o.opens_at > now]
         times += self._answer_wake_times(now)
         leftover = planner.due(openings, now + GRACE, handled)
+        stored = self.store.login_look()
+        if stored is not None and stored <= now:
+            self.store.clear_login_look()        # it has fired
+            stored = None
+        if login_look is None:
+            login_look = stored                  # a look that an earlier wake-up armed is kept by every arming (2026-11-05)
         if leftover and (locked or login_look is not None):
             if locked:
                 at = local_naive(now + LOCKED_RETRY)
@@ -896,16 +949,30 @@ class App:
         with self.awake_fn():                    # the look and the login need the display on (2026-10-18)
             kind = self._blocked_kind()
             if kind is None:
+                self.store.clear_login_look()            # usable: nothing is waiting for a login any more
                 return False
             note = ""
+            if kind == "update" and not dry_run:
+                note = self._fix_update()
+                kind = self._blocked_kind()              # a look again: the popup may be gone, or the app logged out by the update
+                if kind is None:
+                    self.store.clear_login_look()
+                    return False
             if self._may_log_in_by_itself(kind, decision, dry_run):
                 result = self._log_in_by_itself()
                 if result is not None:
                     if result.ok:
+                        self.store.clear_login_look()
                         return False             # logged in: no message, the run goes on in this wake-up
                     note = result.detail or result.status
                     if result.retry_after is not None:
                         self._login_look_at = self.now_fn() + result.retry_after + LOGIN_LOOK_MARGIN
+                        self.store.set_login_look(self._login_look_at)      # every later arming keeps it (2026-11-05)
+                    if result.status == "login_error" and not dry_run:      # no code screen: start the next attempt clean
+                        self._restart_club_app("after a login attempt that ended without a code screen")
+                    if result.status == "update_needed" and not dry_run:      # the code request ended in the update popup
+                        fixed = self._fix_update()
+                        note = f"{note}; {fixed}" if fixed else note
         names = {p.key: p.first_name for p in self.cfg.people}
         waiting = "; ".join(f"{names.get(o.person, o.person)} - {o.name}" for o in decision.due)
         self._tell_blocked(kind, waiting, note)
@@ -1377,6 +1444,14 @@ def build_app(cfg: Config) -> App:
                          screen=lambda: screen_kind(ax.dump()), wait=float(cfg.sms_wait_seconds),
                          evidence=evidence, describe=describe)
 
+    def app_update() -> AppStoreUpdater:
+        def open_url(url: str) -> None:
+            subprocess.run(["/usr/bin/open", url], check=True, capture_output=True, timeout=30)
+
+        def close() -> None:
+            subprocess.run(["/usr/bin/osascript", "-e", 'tell application "App Store" to quit'], capture_output=True, timeout=30)
+        return AppStoreUpdater(AxClient(resolve(cfg, cfg.ax_binary), "App Store"), open_url, cfg.club_app_store_id, close=close)
+
     return App(
         cfg, store, Reporter(cfg.reminders_list), agents,
         screen_factory=lambda: MirroirScreen([str(mirroir)]),
@@ -1389,7 +1464,7 @@ def build_app(cfg: Config) -> App:
             type_into=lambda text, clear: system.type_into(cfg.club_app_name, cfg.club_app_process, text, clear)),
         ax_factory=(lambda: ax) if cfg.reader == "ax" else (lambda: None),
         audit_factory=lambda mode: CalendarAudit(store, cfg.people, mode=mode),
-        auto_login_factory=auto_login, inbox_factory=inbox,
+        auto_login_factory=auto_login, inbox_factory=inbox, app_update_factory=app_update,
     )
 
 

@@ -21,5 +21,6 @@
   "questions": "on",
   "questions_several": false,
   "auto_login": false,
+  "auto_update": true,
   "quit_app_after_run": true
 }

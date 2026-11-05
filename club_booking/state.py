@@ -231,6 +231,23 @@ class Store:
     def refused(self) -> Dict[str, Dict[str, str]]:
         return self._read_json("refused.json", {})
 
+    # -- the pending login look (2026-11-05) ------------------------------------------------------------
+    def login_look(self) -> Optional[datetime]:
+        """When the automatic login may try again after a refusal. One look is armed for it, and every arming keeps it."""
+        raw = self._read_json("login_look.json", {}).get("at")
+        try:
+            return datetime.fromisoformat(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    def set_login_look(self, at: datetime) -> None:
+        with self._locked():
+            self._write_json("login_look.json", {"at": at.isoformat()})
+
+    def clear_login_look(self) -> None:
+        with self._locked():
+            (self.home / "login_look.json").unlink(missing_ok=True)
+
     def unrefuse(self, ident: str) -> None:
         """The user chose this class in an answer: the club's earlier refusal (for example an overlap) is over."""
         with self._locked():

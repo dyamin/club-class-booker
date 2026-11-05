@@ -90,6 +90,8 @@ class Config:
     auto_login: bool = False          # the program logs the club app in by itself (needs Text Message Forwarding): see autologin.py
     sms_sender: str = "Hashmonaim"    # the sender of the login SMS (case, dots and spaces do not matter)
     sms_wait_seconds: int = 120       # how long to wait for the SMS after the code was requested
+    auto_update: bool = True          # the club app shows its update popup: update it in the App Store, then restart it (app_update.py)
+    club_app_store_id: int = 1445866275   # the App Store page of the club app (public); also in its iTunesMetadata.plist
     messages_db: Path = Path.home() / "Library" / "Messages" / "chat.db"
     questions_several: bool = True    # ask which to keep when a person who asks has several classes in a day (R16); the user turned it off on 2026-10-15
 
@@ -114,7 +116,7 @@ _SCALARS = {
     "club_app_name": str, "club_app_process": str, "max_app_restarts": int, "app_restart_wait_seconds": float,
     "app_start_wait_seconds": float,
     "reader": str, "phone_keychain_service": str, "calendar_audit": str, "questions": str,
-    "sms_sender": str, "sms_wait_seconds": int,
+    "sms_sender": str, "sms_wait_seconds": int, "club_app_store_id": int,
 }
 
 
@@ -154,7 +156,7 @@ def load_config(path: Path, repo: Path) -> Config:
     for name in ("mirroir_binary", "ocr_binary", "ax_binary", "messages_db"):
         if name in raw:
             kwargs[name] = Path(raw[name])
-    for name in ("auto_login", "questions_several", "quit_app_after_run"):
+    for name in ("auto_login", "auto_update", "questions_several", "quit_app_after_run"):
         if name in raw:
             if not isinstance(raw[name], bool):
                 raise ConfigError(f"{name} must be true or false, not {raw[name]!r}")

@@ -117,6 +117,13 @@ class HelperTests(unittest.TestCase):
     # 2026-11-05: a live login stopped with "AxError: no such element" at the press of "send me a code", after the request
     # was counted. Such a press pressed nothing, so only that case looks again; a press that happened is never repeated.
 
+    def test_an_update_popup_after_the_press_is_reported_as_update_not_as_unknown(self):
+        # 2026-11-05: the user saw "we need to update the app" after the press; the log said only "the code screen did not appear"
+        popup = dump_of("התחדשנו", "גרסה חדשה של האפליקציה זמינה להורדה. אנא עדכנו גרסה על מנת להמשיך", "לחצו לעדכון")
+        ax = FakeAx(LOGIN, popup)
+        self.assertEqual(self.make(ax).request_code("0500000000"), "update")
+        self.assertEqual(len(self.sends(ax)), 1)
+
     def test_a_press_that_finds_no_send_button_looks_again_and_presses_once(self):
         ax = FlakyAx(2, LOGIN, MOVED, MOVED, CODE)
         self.assertEqual(self.make(ax).request_code("0500000000"), "code_screen")

@@ -150,7 +150,7 @@ The club app logs itself out every few hours and each login needs an SMS code. Y
 **The limits (they protect your login from a lock):**
 - It never asks for a code that it cannot read: if the Messages database cannot be opened, nothing is requested.
 - Its own budget: **one request in 45 minutes and five in 24 hours** (`budgets` in `autologin.py`; it was three until 2026-11-05, when two failed requests and one good login used a whole day and the next morning's login was refused for seven hours), written down before the request, so a request that failed counts too. The app's guard (2 requests in 10 minutes, shared with `login request`) counts too.
-- A login that is refused by these limits, or that failed, arms **one look** for the minute the next request is allowed (`login_look_armed` in the log). That look is an opening agent like any other. No 5-minute retry is counted meanwhile.
+- A login that is refused by these limits, or that failed, arms **one look** for the minute the next request is allowed (`login_look_armed` in the log). That look is an opening agent like any other. No 5-minute retry is counted meanwhile. The look is also kept in the file `login_look.json`, and every later arming includes it until it has fired or the login has worked (2026-11-05: the locked-Mac chain removed it once).
 - A failed attempt keeps what the app showed: `auto_login_screen` in `runs.jsonl` (the screen type, the texts on the screen with every digit hidden) and a picture `evidence/…-login-….png`. The picture can show your phone number; it stays on this Mac.
 - One request per attempt, one code typed per request, no second try (a press that finds no "send me a code" button pressed nothing, and looks again up to 6 times; a press that happened is never repeated). If no SMS comes, the app stays on the code screen: the program types nothing there once the code is older than 5 minutes, and a person must go back to the login screen (quit and open the club app).
 - The code must come in a message from the sender **newer than the snapshot and than the request**, with exactly one 6-digit number, and each message is used once.
@@ -158,6 +158,10 @@ The club app logs itself out every few hours and each login needs an SMS code. Y
 - The way the newest messages store their text (`attributedBody`) was built from knowledge, not tested on a real message: **the feature is not proven until the first live run.**
 
 Config keys: `auto_login` (default `false`), `sms_sender`, `sms_wait_seconds` (120), `messages_db`.
+
+**The update popup (2026-11-05).** The club app can show "a new version is available, update to continue", and then it cannot be used or logged in. When a look finds the popup, or a code request ends in it (the log says `update_needed`), the program opens the app's page in the App Store (`macappstore://apps.apple.com/app/id<club_app_store_id>`) and presses **Update once**, but only when the page offers it (the button says "Update"; it says "Open" when the app is current). Then it quits the club app and opens it again, and looks again. At most **twice a day**. If the popup is still there, the phone is told with the reason (`Automatic update did not work: ...`). The Update press was **not tried against a real update yet** (the App Store had none on 2026-11-05). A password or Touch ID prompt of the Mac needs a person: the wait ends in `timeout`. Config keys: `auto_update` (default `true`; `false` turns the step off), `club_app_store_id` (1445866275, the public App Store id of the club app).
+
+**A restart after a failed login (2026-11-05).** A login attempt that ends without a code screen (`login_error`) quits the club app and opens it again at once, so that the next attempt starts clean. The restart makes no request. On 2026-11-05 the automatic login worked on its first try after such a restart, where two requests before it had ended with no code screen (one data point, not proof).
 
 ## Calendar check
 
