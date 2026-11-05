@@ -952,7 +952,7 @@ class App:
                 self.store.clear_login_look()            # usable: nothing is waiting for a login any more
                 return False
             note = ""
-            if kind == "update" and not dry_run:
+            if kind == "update" and not dry_run and decision.action == "run_due":      # a refresh stands back: it never acts on the screen
                 note = self._fix_update()
                 kind = self._blocked_kind()              # a look again: the popup may be gone, or the app logged out by the update
                 if kind is None:

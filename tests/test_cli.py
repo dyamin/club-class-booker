@@ -1446,6 +1446,13 @@ class UpdatePopupTests(AppCase):
         skipped = [e for e in self.events() if e["event"] == "app_update_skipped"]
         self.assertTrue(skipped and "twice" in skipped[-1]["reason"], "the third and fourth look made no attempt")
 
+    def test_a_plan_refresh_never_updates_nor_restarts(self):
+        # a refresh stands back like the automatic login: only a class that is waiting makes the program act on the screen
+        from club_booking.cli import TickDecision
+        self.popup()
+        blocked = self.app._logged_out_now(TickDecision("replan", (), ()), False)
+        self.assertEqual((blocked, self.updates, self.club_app.restarts), (True, [], 0))
+
     def test_a_dry_run_updates_nothing(self):
         self.popup()
         self.app.cmd_tick(True, False)
