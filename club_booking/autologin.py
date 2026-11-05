@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from .login import LoginBlocked, LoginError, LoginGuard
+from .login import LoginBlocked, LoginError, LoginGuard, LoginNotSent
 from .sms import SmsError
 
 CODE_VALID = timedelta(minutes=5)          # the app's code is valid for 5 minutes
@@ -57,9 +57,11 @@ def _masked(text: str, limit: int = 200) -> str:
 
 # The statuses after which the program may not ask again at once, and the ones after which a request was made and the
 # screen is worth a look (a refusal by the budget made no request, so there is nothing to show).
-RETRY_STATUSES = ("budget", "blocked", "login_error", "update_needed", "no_sms", "bad_code", "stale_code_screen")
-TRIED_STATUSES = ("login_error", "update_needed", "no_sms", "bad_code", "stale_code_screen")
+RETRY_STATUSES = ("budget", "blocked", "login_error", "not_sent", "update_needed", "no_sms", "bad_code", "stale_code_screen")
+TRIED_STATUSES = ("login_error", "not_sent", "update_needed", "no_sms", "bad_code", "stale_code_screen")
 APP_LOCK = timedelta(minutes=10)               # the app locks the login for 10 minutes after too many requests
+NOT_SENT_RETRY = timedelta(minutes=5)          # the button was not found, the request was given back: look again after this
+MAX_REFUNDS_PER_DAY = 3                        # a missing button must not repeat without end (typing, restarts) when nothing is counted
 
 
 def _minutes(wait: timedelta) -> int:
@@ -97,10 +99,23 @@ class AutoLogin:
         self.state_path.write_text(json.dumps(data), encoding="utf-8")
 
     # -- after a failure ------------------------------------------------------------------------------------
-    def _next_request_in(self, status: str) -> Optional[timedelta]:
-        """How long until the program's own budget (and, after the app's lock, the app) allows the next request."""
+    def _refund(self, requested_at: datetime) -> bool:
+        """The press was never made, so the request is taken out of both budgets, at most MAX_REFUNDS_PER_DAY times a day.
+        Returns False when the day's refunds are used up (then the request counts)."""
+        day = f"{self.now_fn():%Y%m%d}"
+        refunds = self._load().get("refunds") or {}
+        if refunds.get(day, 0) >= MAX_REFUNDS_PER_DAY:
+            return False
+        self._save(refunds={day: refunds.get(day, 0) + 1})          # older days are dropped
+        self.hour_budget.forget_request(requested_at)
+        self.day_budget.forget_request(requested_at)
+        return True
+
+    def _next_request_in(self, status: str, floor: Optional[timedelta] = None) -> Optional[timedelta]:
+        """How long until the program's own budget (and, after the app's lock, the app) allows the next request.
+        floor: a shorter wait is not allowed (a request that was given back may be tried again, but not at once)."""
         now = self.now_fn()
-        waits = [w for w in (self.hour_budget.check(now), self.day_budget.check(now)) if w]
+        waits = [w for w in (self.hour_budget.check(now), self.day_budget.check(now), floor) if w]
         if status == "blocked":
             waits.append(APP_LOCK)
         return max(waits) if waits else None
@@ -132,7 +147,7 @@ class AutoLogin:
         if result.status in TRIED_STATUSES:
             result = self._keep_evidence(result)
         if result.status in RETRY_STATUSES:
-            result = replace(result, retry_after=self._next_request_in(result.status))
+            result = replace(result, retry_after=self._next_request_in(result.status, result.retry_after))
         if result.ok or not result.detail:
             self.log("auto_login", status=result.status)         # never the code, the number or a message
         else:
@@ -170,6 +185,8 @@ class AutoLogin:
             shown = self.helper.request_code(phone)
         except LoginBlocked as exc:
             return AutoResult("blocked", str(exc))
+        except LoginNotSent as exc:               # nothing was pressed: give the request back (three times a day)
+            return AutoResult("not_sent", str(exc), retry_after=NOT_SENT_RETRY if self._refund(now) else None)
         except LoginError as exc:
             return AutoResult("login_error", str(exc))
         except Exception as exc:                  # 2026-11-05: "AxError: no such element" ended a login as a crash, uncounted

@@ -968,7 +968,7 @@ class App:
                     if result.retry_after is not None:
                         self._login_look_at = self.now_fn() + result.retry_after + LOGIN_LOOK_MARGIN
                         self.store.set_login_look(self._login_look_at)      # every later arming keeps it (2026-11-05)
-                    if result.status == "login_error" and not dry_run:      # no code screen: start the next attempt clean
+                    if result.status in ("login_error", "not_sent") and not dry_run:      # no code screen: start the next attempt clean
                         self._restart_club_app("after a login attempt that ended without a code screen")
                     if result.status == "update_needed" and not dry_run:      # the code request ended in the update popup
                         fixed = self._fix_update()

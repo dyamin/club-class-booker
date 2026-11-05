@@ -5,7 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from club_booking.ax import AxDump, AxElement, AxError
-from club_booking.login import LoginBlocked, LoginError, LoginGuard, LoginHelper
+from club_booking.login import LoginBlocked, LoginError, LoginGuard, LoginHelper, LoginNotSent
 
 TZ = ZoneInfo("Asia/Jerusalem")
 T0 = datetime(2026, 10, 13, 11, 40, tzinfo=TZ)
@@ -135,11 +135,22 @@ class HelperTests(unittest.TestCase):
         self.make(ax).request_code("0500000000")
         self.assertEqual(self.sends(ax), [("AXButton", "שלחו לי קוד", 718)], "the button moved: y 700 + 18")
 
-    def test_a_button_that_never_appears_is_an_error_after_a_few_looks_and_nothing_is_pressed(self):
+    def test_a_button_that_never_appears_is_not_sent_and_the_request_is_given_back(self):
+        # 2026-11-05: nothing was pressed, so nothing was sent: it must not use up the app's guard or the program's budget
         ax = FlakyAx(99, LOGIN, MOVED)
-        with self.assertRaises(AxError):
+        with self.assertRaises(LoginNotSent):
             self.make(ax).request_code("0500000000")
         self.assertEqual((ax.tries, self.sends(ax)), (6, []))
+        self.assertEqual(self.guard.requests(), [], "given back")
+
+    def test_a_not_sent_login_is_still_a_login_error_for_callers_that_know_only_that(self):
+        self.assertTrue(issubclass(LoginNotSent, LoginError))
+
+    def test_a_press_that_failed_in_another_way_keeps_the_request_counted(self):
+        ax = FlakyAx(99, LOGIN, error="the press failed")
+        with self.assertRaises(AxError):
+            self.make(ax).request_code("0500000000")
+        self.assertEqual(len(self.guard.requests()), 1, "the press may have happened")
 
     def test_any_other_press_error_is_not_tried_again(self):
         ax = FlakyAx(99, LOGIN, error="the press failed")

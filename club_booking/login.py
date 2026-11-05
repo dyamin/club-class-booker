@@ -32,6 +32,11 @@ class LoginBlocked(LoginError):
     """The login is locked, or the next step would make the app lock it."""
 
 
+class LoginNotSent(LoginError):
+    """The button "send me a code" was never pressed (it was not found), so no code was asked for and nothing was counted
+    by the app (2026-11-05). The request is given back."""
+
+
 class LoginGuard:
     def __init__(self, path: Path, max_requests: int = 3, window: timedelta = timedelta(minutes=10)) -> None:
         self.path = Path(path)
@@ -48,6 +53,12 @@ class LoginGuard:
     def _save(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def forget_request(self, at: datetime) -> None:
+        """Give a request back: its press was never made (2026-11-05)."""
+        data = self._load()
+        data["requests"] = [t.isoformat() for t in self._times("requests") if t != at]
+        self._save(data)
 
     def _times(self, key: str) -> List[datetime]:
         out: List[datetime] = []
@@ -159,8 +170,11 @@ class LoginHelper:
                 self.ax.press("AXButton", SEND, send_y, 30)
                 return
             except AxError as exc:
-                if "no such element" not in str(exc) or attempt == SEND_LOOKS - 1:
-                    raise
+                if "no such element" not in str(exc):
+                    raise                                    # it may have been pressed
+                if attempt == SEND_LOOKS - 1:
+                    raise LoginNotSent(f"the button 'send me a code' was not found in {SEND_LOOKS} looks: "
+                                       "nothing was pressed and nothing was sent") from exc
             self.sleep(0.5)
             try:
                 send_y = self._center(self.ax.dump(), SEND)
@@ -195,7 +209,11 @@ class LoginHelper:
         else:
             raise LoginError(f"the field shows {shown!r}, not the number: nothing was sent")
         self.guard.record_request(now)                      # written before the press
-        self._press_send(send_y)                             # exactly once, never repeated
+        try:
+            self._press_send(send_y)                         # exactly once, never repeated
+        except LoginNotSent:
+            self.guard.forget_request(now)                   # nothing was pressed: nothing is counted
+            raise
         after = self._wait_for(lambda kind: kind in ("code", "locked", "update"))
         if after == "code":
             return "code_screen"

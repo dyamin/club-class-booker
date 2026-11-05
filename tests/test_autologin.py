@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from club_booking.autologin import AutoLogin, budgets
-from club_booking.login import LoginBlocked, LoginError, LoginGuard
+from club_booking.login import LoginBlocked, LoginError, LoginGuard, LoginNotSent
 from club_booking.sms import SmsError
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -269,6 +269,49 @@ class RetryAfterTests(AutoCase):
         self.state["kind"] = "favorites"
         result = self.make().run()
         self.assertEqual((result.status, result.retry_after), ("not_login_screen", None))
+
+
+class RefundTests(AutoCase):
+    """2026-11-05: a request whose press was never made sent nothing. It is given back to the budget (three times a day at
+    most: a missing button must not repeat without end), and the next try comes 5 minutes later."""
+
+    def not_sent(self):
+        self.helper.request_error = LoginNotSent("the button was not found: nothing was pressed")
+        return self.make().run()
+
+    def counted(self):
+        hour, day = budgets(self.home)
+        return len(hour.requests()), len(day.requests())
+
+    def test_a_request_that_was_not_sent_is_given_back_and_retried_in_5_minutes(self):
+        result = self.not_sent()
+        self.assertEqual((result.status, result.retry_after), ("not_sent", timedelta(minutes=5)))
+        self.assertEqual(self.counted(), (0, 0))
+
+    def test_only_three_requests_a_day_are_given_back(self):
+        for _ in range(3):
+            self.assertEqual(self.not_sent().retry_after, timedelta(minutes=5))
+        self.assertEqual(self.counted(), (0, 0))
+        fourth = self.not_sent()
+        self.assertEqual(self.counted(), (1, 1), "the fourth counts")
+        self.assertEqual(fourth.retry_after, timedelta(minutes=45))
+
+    def test_the_refunds_start_again_the_next_day(self):
+        for _ in range(4):
+            self.not_sent()
+        self.state["now"] = NOW + timedelta(hours=25)
+        self.assertEqual(self.not_sent().retry_after, timedelta(minutes=5))
+
+    def test_a_request_that_was_pressed_is_never_given_back(self):
+        self.helper.request_result = "unknown"
+        self.make().run()
+        self.assertEqual(self.counted(), (1, 1))
+
+    def test_a_not_sent_login_keeps_evidence_like_any_failed_attempt(self):
+        self.helper.request_error = LoginNotSent("x")
+        pictures = []
+        result = self.make(evidence=lambda label: pictures.append(label) or "p.png", describe=lambda: "t").run()
+        self.assertEqual((result.status, pictures), ("not_sent", ["login-not_sent"]))
 
 
 class FailureEvidenceTests(AutoCase):

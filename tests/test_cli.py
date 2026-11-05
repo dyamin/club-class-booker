@@ -1562,6 +1562,10 @@ class FailedLoginRestartTests(AppCase):
         self.assertEqual(self.club_app.restarts, 1)
         self.assertIn("login", self.restarts()[-1]["reason"])
 
+    def test_a_button_that_was_not_found_restarts_the_app_too(self):
+        self.attempt("not_sent")
+        self.assertEqual(self.club_app.restarts, 1)
+
     def test_a_refusal_by_the_budget_restarts_nothing(self):
         self.attempt("budget")
         self.assertEqual(self.club_app.restarts, 0)
