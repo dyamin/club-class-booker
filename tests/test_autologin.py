@@ -91,26 +91,26 @@ class AutoCase(unittest.TestCase):
 
 
 class ProgramBudgetTests(unittest.TestCase):
-    """The program's own login budget, the one the real program builds (2026-11-05: five requests in 24 hours, not
-    three. Two requests that got no code screen and one good login used the whole day, and the next morning's login was
-    refused for seven hours while a class was open)."""
+    """The program's own login budget, the one the real program builds (2026-11-05: eight requests in 24 hours. It was three,
+    then five: two requests that got no code screen and one good login used the whole day, and the next morning's login was
+    refused for seven hours while a class was open; by the afternoon three of five were used by failures)."""
 
     def setUp(self):
         self.hour, self.day = budgets(Path(tempfile.mkdtemp()))
 
-    def test_five_requests_in_24_hours_are_allowed_and_the_sixth_is_not(self):
+    def test_eight_requests_in_24_hours_are_allowed_and_the_ninth_is_not(self):
         now = NOW
-        for number in range(1, 6):
+        for number in range(1, 9):
             self.assertIsNone(self.day.check(now), f"request {number} must be allowed")
             self.day.record_request(now)
             now += timedelta(hours=1)
-        self.assertIsNotNone(self.day.check(now), "the sixth request waits: one request stays free for the user")
+        self.assertIsNotNone(self.day.check(now), "the ninth request waits: one request stays free for the user")
 
     def test_the_day_budget_comes_back_24_hours_after_the_oldest_request(self):
-        for number in range(5):
+        for number in range(8):
             self.day.record_request(NOW + timedelta(minutes=50 * number))
-        wait = self.day.check(NOW + timedelta(hours=5))
-        self.assertEqual(NOW + timedelta(hours=5) + wait, NOW + timedelta(hours=24))
+        wait = self.day.check(NOW + timedelta(hours=7))
+        self.assertEqual(NOW + timedelta(hours=7) + wait, NOW + timedelta(hours=24))
 
     def test_one_request_in_45_minutes_is_still_the_rule(self):
         self.hour.record_request(NOW)
@@ -214,12 +214,12 @@ class BudgetTests(AutoCase):
         self.assertEqual((result.status, len(self.helper.requests)), ("budget", 1))
         self.assertIn("minutes", result.detail)
 
-    def test_after_45_minutes_it_may_ask_again_but_never_a_sixth_time_in_a_day(self):
-        for i in range(6):
+    def test_after_45_minutes_it_may_ask_again_but_never_a_ninth_time_in_a_day(self):
+        for i in range(9):
             self.state["now"] = NOW + timedelta(minutes=50 * i)
             self.inbox.script = [[(101 + i, f"11111{i}")]]
             self.make().run()
-        self.assertEqual(len(self.helper.requests), 5, "five a day, at most (2026-11-05: it was three)")
+        self.assertEqual(len(self.helper.requests), 8, "eight a day, at most (2026-11-05: it was three, then five)")
 
     def test_a_request_that_failed_still_uses_up_the_budget(self):
         self.helper.request_error = LoginError("the field shows something else")
@@ -241,11 +241,11 @@ class RetryAfterTests(AutoCase):
         self.assertEqual(self.state["now"] + result.retry_after, NOW + timedelta(minutes=45))
 
     def test_a_refusal_by_the_day_budget_says_when_the_oldest_request_leaves_the_day(self):
-        for i in range(5):
+        for i in range(8):
             self.state["now"] = NOW + timedelta(minutes=50 * i)
             self.inbox.script = [[(101 + i, f"22222{i}")]]
             self.assertEqual(self.make().run().status, "logged_in")
-        self.state["now"] = NOW + timedelta(minutes=50 * 5)
+        self.state["now"] = NOW + timedelta(minutes=50 * 8)
         result = self.make().run()
         self.assertEqual(result.status, "budget")
         self.assertEqual(self.state["now"] + result.retry_after, NOW + timedelta(hours=24))

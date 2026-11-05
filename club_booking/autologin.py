@@ -6,7 +6,7 @@ the Mac's Messages database (sms.py), and the risk is kept small by these rules:
 - it acts only on the login screen, and only when a class is waiting (the caller decides that);
 - it never asks for a code that it cannot read: the snapshot of the Messages database comes first, and a database that
   cannot be read means no request;
-- its own budget: one request in 45 minutes and five in 24 hours (see `budgets`), written down BEFORE the request, on top of the
+- its own budget: one request in 45 minutes and eight in 24 hours (see `budgets`), written down BEFORE the request, on top of the
   login guard of the app (2 requests in 10 minutes), which counts manual requests too;
 - one request per attempt, one code typed per request, never a second try: when no SMS arrives it stops and the phone is
   told why;
@@ -29,7 +29,7 @@ from .sms import SmsError
 
 CODE_VALID = timedelta(minutes=5)          # the app's code is valid for 5 minutes
 HOUR_LIMIT, HOUR_WINDOW = 2, timedelta(minutes=45)   # LoginGuard keeps one request free: one automatic request per 45 minutes
-DAY_LIMIT, DAY_WINDOW = 6, timedelta(hours=24)       # five automatic requests a day (2026-11-05: it was three, and a day with two failed requests used all of it)
+DAY_LIMIT, DAY_WINDOW = 9, timedelta(hours=24)       # eight automatic requests a day (2026-11-05: three, then five; failed requests count, and three of five were used by failures)
 
 
 def budgets(home: Path):
