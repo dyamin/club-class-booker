@@ -36,7 +36,7 @@ from .scheduler import LaunchAgents, OPENING_PREFIX, TEST_LABEL, label_time, wak
 from .screen import MirroirScreen, ScreenError
 from .secrets import SecretError, get_api_key, store_secret
 from .sms import MessagesInbox, SmsError, python_app_path
-from .autologin import AutoLogin
+from .autologin import AutoLogin, budgets
 from .setup import check_mirroir_config, check_mirroir_permissions, init_mirroir_config
 from .state import LockBusy, Store
 from .system import idle_seconds, keep_display_awake, screen_unavailable, wake_if_only_asleep
@@ -50,6 +50,7 @@ MAX_RETRIES = 6                         # per opening: a class that never works 
 OPENING_WAIT = 20 * 60                  # an opening agent waits this long for the user to unlock the Mac
 OPENING_POLL = 15                       # ... looking every 15 seconds
 LOCKED_RETRY = timedelta(minutes=10)    # the wait ended with the Mac still locked: look again this long after it (2026-11-04)
+LOGIN_LOOK_MARGIN = timedelta(minutes=1)  # a look for a refused login comes this long after the budget allows a request (2026-11-05)
 PAIRING_STALE_DAYS = 14           # a Mac that has received no message for this long is not paired with the iPhone
 COUNTDOWN_IF_IDLE_BELOW = 120.0   # the "keep your hands off the mouse" banner only when the user is at the Mac
 MIN_IDLE = 600.0                 # default: a non-urgent step waits until the user has been away this long
@@ -137,6 +138,7 @@ class App:
         self.inbox_factory = inbox_factory              # -> MessagesInbox: for the doctor and the wake-up test
         self._session_used = False       # the club app was used in this session (a run, the answers step)
         self._session_keep_open = False  # ... and it must stay open: the user has to log in, or came back
+        self._login_look_at: Optional[datetime] = None   # when the automatic login may try again after a refusal (2026-11-05)
 
     # -- messages ------------------------------------------------------------------------------
     def _send(self, title: str, body: str, kind: str, persons: Sequence[str], ident: str) -> List[str]:
@@ -754,7 +756,7 @@ class App:
             if not dry_run:       # the calendar is no decision (the user's rule of 2026-10-15): the log, not the phone
                 self.store.log("calendar_audit_report", title=report[0], body=report[1])
 
-    def rearm(self, errored: Collection[str] = (), locked: bool = False) -> None:
+    def rearm(self, errored: Collection[str] = (), locked: bool = False, login_look: Optional[datetime] = None) -> None:
         """Make the opening agents match the plan: one persistent agent for EVERY future opening of any class of the
         three people, so the program wakes at each opening time and never before it. There is no timer.
 
@@ -769,6 +771,10 @@ class App:
         it books the moment the user unlocks, with the banner and the typing-pause guard of an urgent run. It tells
         nobody (the reminder is once a day).
 
+        login_look: the automatic login was refused or failed and may try again at this time (2026-11-05: its budget of
+        24 hours was spent and it was refused for seven hours; the 5-minute retries were refused too and end after six).
+        One look is armed for that minute, and no retry is counted meanwhile.
+
         Nothing is armed before `install`: the user approves the launchd agents once, and a manual run must not
         add one."""
         if not self.agents.is_installed():
@@ -782,10 +788,15 @@ class App:
         times = [local_naive(o.opens_at) for o in openings if o.ident not in handled and o.opens_at > now]
         times += self._answer_wake_times(now)
         leftover = planner.due(openings, now + GRACE, handled)
-        if locked and leftover:
-            at = local_naive(now + LOCKED_RETRY)
-            times.append(at)
-            self.store.log("locked_retry_armed", at=f"{at:%Y-%m-%d %H:%M}", due=[o.ident for o in leftover])
+        if leftover and (locked or login_look is not None):
+            if locked:
+                at = local_naive(now + LOCKED_RETRY)
+                times.append(at)
+                self.store.log("locked_retry_armed", at=f"{at:%Y-%m-%d %H:%M}", due=[o.ident for o in leftover])
+            if login_look is not None:
+                at = local_naive(max(login_look, now + RETRY_SOON))
+                times.append(at)
+                self.store.log("login_look_armed", at=f"{at:%Y-%m-%d %H:%M}", due=[o.ident for o in leftover])
         elif leftover and max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
             failing = any(o.person in errored for o in leftover)
             times.append(local_naive(now + (RETRY_ERRORED if failing else RETRY_SOON)))
@@ -863,14 +874,16 @@ class App:
             if decision.action in ("run_due", "replan") and self._blocked_kind() is not None:
                 continue
             return self.cmd_tick(dry_run, notify, _waited=True)         # usable, or nothing due any more
-        if still_locked:
-            self._arm_locked_look()
+        if still_locked or self._login_look_at is not None:
+            self._arm_next_look(locked=still_locked)
         return 0
 
-    def _arm_locked_look(self) -> None:
-        """Arm the next look for a class that is due while the Mac is locked. Never raises (a failed arming is logged)."""
+    def _arm_next_look(self, locked: bool) -> None:
+        """Arm the next look for a class that is still due: 10 minutes on when the Mac is locked, and at the minute the
+        automatic login may try again when it was refused. Last thing before the agent ends: a later arming would
+        remove it. Never raises (a failed arming is logged)."""
         try:
-            self.rearm(locked=True)
+            self.rearm(locked=locked, login_look=self._login_look_at)
         except Exception as exc:
             self.store.log("locked_retry_failed", error=f"{type(exc).__name__}: {exc}")
 
@@ -891,6 +904,8 @@ class App:
                     if result.ok:
                         return False             # logged in: no message, the run goes on in this wake-up
                     note = result.detail or result.status
+                    if result.retry_after is not None:
+                        self._login_look_at = self.now_fn() + result.retry_after + LOGIN_LOOK_MARGIN
         names = {p.key: p.first_name for p in self.cfg.people}
         waiting = "; ".join(f"{names.get(o.person, o.person)} - {o.name}" for o in decision.due)
         self._tell_blocked(kind, waiting, note)
@@ -965,6 +980,7 @@ class App:
         return 1
 
     def _tick(self, dry_run: bool, notify: bool, waited: bool = False) -> int:
+        self._login_look_at = None
         now = self.now_fn()
         if self.store.paused():
             return 0
@@ -1004,6 +1020,8 @@ class App:
         if decision.action in ("run_due", "replan") and self._logged_out_now(decision, dry_run):
             if self._is_opening_agent() and not waited and not dry_run:
                 return self._wait_until_usable(dry_run, notify)        # the user may log in within minutes
+            if self._login_look_at is not None and not dry_run:
+                self._arm_next_look(locked=False)                       # no wait here: look when the login may try again
             return 0
         if decision.action == "replan":
             tried = self.store.bump_attempt(f"replan|{now:%Y%m%d}")
@@ -1023,7 +1041,7 @@ class App:
             if self._is_opening_agent() and not waited and not dry_run:
                 return self._wait_until_usable(dry_run, notify)
             if not dry_run:
-                self._arm_locked_look()             # no wait here (the slow tick, or a Mac that locked again): look later
+                self._arm_next_look(locked=True)    # no wait here (the slow tick, or a Mac that locked again): look later
             return 0
         persons = ([self.cfg.person(k) for k in decision.persons] if decision.action == "run_due"
                    else list(self.cfg.people))
@@ -1037,7 +1055,11 @@ class App:
             if retry_login:
                 result, again = self._after_logged_out_run(decision, persons, result, urgent)
                 if again:
-                    return self._wait_until_usable(False, notify) if self._is_opening_agent() and not waited else 0
+                    if self._is_opening_agent() and not waited:
+                        return self._wait_until_usable(False, notify)
+                    if self._login_look_at is not None:
+                        self._arm_next_look(locked=False)
+                    return 0
         except LockBusy:
             self.store.log("tick_busy")
             return 0
@@ -1341,10 +1363,19 @@ def build_app(cfg: Config) -> App:
             attention.note()
             return done
         helper = LoginHelper(ax, LoginGuard(cfg.home / "login.json"), read_field=read_field, type_into=typing)
-        return AutoLogin(helper, inbox(), LoginGuard(cfg.home / "autologin-hour.json", 2, timedelta(minutes=45)),
-                         LoginGuard(cfg.home / "autologin-day.json", 4, timedelta(hours=24)), cfg.home / "autologin.json",
+        def evidence(label: str) -> str:
+            """A picture of the club app after a failed attempt (it may show the phone number; it stays on this Mac)."""
+            with MirroirScreen([str(mirroir)]) as screen:
+                return store.save_evidence(label, screen.screenshot()).name
+
+        def describe() -> str:
+            return " | ".join(e.desc.replace("\n", " ") for e in ax.dump().elements if e.desc)
+
+        hour_budget, day_budget = budgets(cfg.home)
+        return AutoLogin(helper, inbox(), hour_budget, day_budget, cfg.home / "autologin.json",
                          phone=lambda: get_api_key(cfg.phone_keychain_service), log=store.log,
-                         screen=lambda: screen_kind(ax.dump()), wait=float(cfg.sms_wait_seconds))
+                         screen=lambda: screen_kind(ax.dump()), wait=float(cfg.sms_wait_seconds),
+                         evidence=evidence, describe=describe)
 
     return App(
         cfg, store, Reporter(cfg.reminders_list), agents,

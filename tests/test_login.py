@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from club_booking.ax import AxDump, AxElement
+from club_booking.ax import AxDump, AxElement, AxError
 from club_booking.login import LoginBlocked, LoginError, LoginGuard, LoginHelper
 
 TZ = ZoneInfo("Asia/Jerusalem")
@@ -34,6 +34,26 @@ class FakeAx:
 
     def press(self, role, desc, y, tolerance=25):
         self.presses.append((role, desc, round(y)))
+
+
+class FlakyAx(FakeAx):
+    """The first `misses` presses of "send me a code" find no such button (nothing is pressed), then it works."""
+
+    def __init__(self, misses, *dumps, error="no such element"):
+        super().__init__(*dumps)
+        self.misses, self.error, self.tries = misses, error, 0
+
+    def press(self, role, desc, y, tolerance=25):
+        if desc == "שלחו לי קוד":
+            self.tries += 1
+            if self.tries <= self.misses:
+                raise AxError(self.error)
+        super().press(role, desc, y, tolerance)
+
+
+MOVED = AxDump(AxElement("AXWindow", "x", "", 0, 0, 1024, 800), [
+    AxElement("AXButton", "מספר הטלפון שלך", "", 31, 246, 963, 37),
+    AxElement("AXButton", "שלחו לי קוד", "", 8, 700, 1009, 37)])
 
 
 class GuardTests(unittest.TestCase):
@@ -93,6 +113,32 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(ax.presses[0], ("AXButton", "מספר הטלפון שלך", 264))
         self.assertEqual(len(self.sends(ax)), 1)
         self.assertEqual(len(self.guard.requests()), 1)
+
+    # 2026-11-05: a live login stopped with "AxError: no such element" at the press of "send me a code", after the request
+    # was counted. Such a press pressed nothing, so only that case looks again; a press that happened is never repeated.
+
+    def test_a_press_that_finds_no_send_button_looks_again_and_presses_once(self):
+        ax = FlakyAx(2, LOGIN, MOVED, MOVED, CODE)
+        self.assertEqual(self.make(ax).request_code("0500000000"), "code_screen")
+        self.assertEqual((ax.tries, len(self.sends(ax))), (3, 1), "two misses, then one press")
+        self.assertEqual(len(self.guard.requests()), 1, "one request, counted once")
+
+    def test_the_second_look_takes_the_position_from_a_fresh_dump(self):
+        ax = FlakyAx(1, LOGIN, MOVED, CODE)
+        self.make(ax).request_code("0500000000")
+        self.assertEqual(self.sends(ax), [("AXButton", "שלחו לי קוד", 718)], "the button moved: y 700 + 18")
+
+    def test_a_button_that_never_appears_is_an_error_after_a_few_looks_and_nothing_is_pressed(self):
+        ax = FlakyAx(99, LOGIN, MOVED)
+        with self.assertRaises(AxError):
+            self.make(ax).request_code("0500000000")
+        self.assertEqual((ax.tries, self.sends(ax)), (6, []))
+
+    def test_any_other_press_error_is_not_tried_again(self):
+        ax = FlakyAx(99, LOGIN, error="the press failed")
+        with self.assertRaises(AxError):
+            self.make(ax).request_code("0500000000")
+        self.assertEqual(ax.tries, 1, "the press may have happened: never a second one")
 
     def test_the_number_is_typed_with_a_clear_and_the_code_without(self):
         ax = FakeAx(LOGIN, CODE)

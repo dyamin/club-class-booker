@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from club_booking.autologin import AutoLogin
+from club_booking.autologin import AutoLogin, budgets
 from club_booking.login import LoginBlocked, LoginError, LoginGuard
 from club_booking.sms import SmsError
 
@@ -81,13 +81,41 @@ class AutoCase(unittest.TestCase):
             if self.state["phone"] is None:
                 raise RuntimeError("no phone in the Keychain")
             return self.state["phone"]
-        return AutoLogin(self.helper, self.inbox, LoginGuard(self.home / "h.json", 2, timedelta(minutes=45)),
-                         LoginGuard(self.home / "d.json", 4, timedelta(hours=24)), self.home / "autologin.json",
+        hour, day = budgets(self.home)           # the numbers of the real program, not a copy of them
+        return AutoLogin(self.helper, self.inbox, hour, day, self.home / "autologin.json",
                          phone=phone, log=lambda event, **f: self.logs.append((event, f)), sleep=sleep,
                          now_fn=lambda: self.state["now"], screen=lambda: self.state["kind"], **kw)
 
     def saved(self):
         return json.loads((self.home / "autologin.json").read_text())
+
+
+class ProgramBudgetTests(unittest.TestCase):
+    """The program's own login budget, the one the real program builds (2026-11-05: five requests in 24 hours, not
+    three. Two requests that got no code screen and one good login used the whole day, and the next morning's login was
+    refused for seven hours while a class was open)."""
+
+    def setUp(self):
+        self.hour, self.day = budgets(Path(tempfile.mkdtemp()))
+
+    def test_five_requests_in_24_hours_are_allowed_and_the_sixth_is_not(self):
+        now = NOW
+        for number in range(1, 6):
+            self.assertIsNone(self.day.check(now), f"request {number} must be allowed")
+            self.day.record_request(now)
+            now += timedelta(hours=1)
+        self.assertIsNotNone(self.day.check(now), "the sixth request waits: one request stays free for the user")
+
+    def test_the_day_budget_comes_back_24_hours_after_the_oldest_request(self):
+        for number in range(5):
+            self.day.record_request(NOW + timedelta(minutes=50 * number))
+        wait = self.day.check(NOW + timedelta(hours=5))
+        self.assertEqual(NOW + timedelta(hours=5) + wait, NOW + timedelta(hours=24))
+
+    def test_one_request_in_45_minutes_is_still_the_rule(self):
+        self.hour.record_request(NOW)
+        self.assertIsNotNone(self.hour.check(NOW + timedelta(minutes=44)))
+        self.assertIsNone(self.hour.check(NOW + timedelta(minutes=46)))
 
 
 class HappyPathTests(AutoCase):
@@ -109,7 +137,7 @@ class HappyPathTests(AutoCase):
 
         def spy(phone):
             seen["state"] = self.saved()
-            seen["hour"] = LoginGuard(self.home / "h.json", 2, timedelta(minutes=45)).requests()
+            seen["hour"] = budgets(self.home)[0].requests()
             return original(phone)
         self.helper.request_code = spy
         self.inbox.script = [[(101, "123456")]]
@@ -174,7 +202,7 @@ class WhenItDoesNothingTests(AutoCase):
             self.helper.guard.record_request(NOW - timedelta(minutes=1))       # two manual requests just now
         result = self.make().run()
         self.assertEqual((result.status, self.helper.requests), ("blocked", []))
-        self.assertEqual(LoginGuard(self.home / "h.json", 2, timedelta(minutes=45)).requests(), [])
+        self.assertEqual(budgets(self.home)[0].requests(), [])
 
 
 class BudgetTests(AutoCase):
@@ -186,18 +214,120 @@ class BudgetTests(AutoCase):
         self.assertEqual((result.status, len(self.helper.requests)), ("budget", 1))
         self.assertIn("minutes", result.detail)
 
-    def test_after_45_minutes_it_may_ask_again_but_never_a_fourth_time_in_a_day(self):
-        for i in range(4):
+    def test_after_45_minutes_it_may_ask_again_but_never_a_sixth_time_in_a_day(self):
+        for i in range(6):
             self.state["now"] = NOW + timedelta(minutes=50 * i)
             self.inbox.script = [[(101 + i, f"11111{i}")]]
             self.make().run()
-        self.assertEqual(len(self.helper.requests), 3, "three a day, at most")
+        self.assertEqual(len(self.helper.requests), 5, "five a day, at most (2026-11-05: it was three)")
 
     def test_a_request_that_failed_still_uses_up_the_budget(self):
         self.helper.request_error = LoginError("the field shows something else")
         self.assertEqual(self.make().run().status, "login_error")
         self.state["now"] = NOW + timedelta(minutes=10)
         self.assertEqual(self.make().run().status, "budget")
+
+
+class RetryAfterTests(AutoCase):
+    """2026-11-05: a refused or failed login must say when the next request is allowed, so that the caller can arm a look
+    for that minute. Before, a login that was refused for seven hours left nothing that woke the program again."""
+
+    def test_a_refusal_by_the_45_minute_budget_says_when_it_ends(self):
+        self.inbox.script = [[(101, "123456")]]
+        self.make().run()
+        self.state["now"] = NOW + timedelta(minutes=30)
+        result = self.make().run()
+        self.assertEqual(result.status, "budget")
+        self.assertEqual(self.state["now"] + result.retry_after, NOW + timedelta(minutes=45))
+
+    def test_a_refusal_by_the_day_budget_says_when_the_oldest_request_leaves_the_day(self):
+        for i in range(5):
+            self.state["now"] = NOW + timedelta(minutes=50 * i)
+            self.inbox.script = [[(101 + i, f"22222{i}")]]
+            self.assertEqual(self.make().run().status, "logged_in")
+        self.state["now"] = NOW + timedelta(minutes=50 * 5)
+        result = self.make().run()
+        self.assertEqual(result.status, "budget")
+        self.assertEqual(self.state["now"] + result.retry_after, NOW + timedelta(hours=24))
+
+    def test_a_request_that_failed_says_when_the_next_one_is_allowed(self):
+        self.helper.request_error = LoginError("the field shows something else")
+        result = self.make().run()
+        self.assertEqual((result.status, result.retry_after), ("login_error", timedelta(minutes=45)))
+
+    def test_a_login_that_worked_has_no_retry_time(self):
+        self.inbox.script = [[(101, "123456")]]
+        self.assertIsNone(self.make().run().retry_after)
+
+    def test_a_screen_that_is_not_the_login_screen_has_no_retry_time(self):
+        self.state["kind"] = "favorites"
+        result = self.make().run()
+        self.assertEqual((result.status, result.retry_after), ("not_login_screen", None))
+
+
+class FailureEvidenceTests(AutoCase):
+    """2026-11-05: two requests ended with 'the code screen did not appear' and the log could not say what the app showed.
+    A failed attempt now keeps the screen type, the texts on the screen (digits hidden) and a picture."""
+
+    def make_with(self, **kw):
+        self.pictures = []
+
+        def evidence(label):
+            self.pictures.append(label)
+            return "20261105-evidence.png"
+        return self.make(evidence=evidence, describe=lambda: "שלחו לי קוד | הקוד 123456 נשלח ל 0501112233", **kw)
+
+    def failure_log(self):
+        return [f for event, f in self.logs if event == "auto_login_screen"]
+
+    def test_no_code_screen_keeps_the_screen_type_the_texts_and_a_picture(self):
+        def pressed(phone):
+            self.state["kind"] = "other"             # what the app shows after the press: neither the code screen nor the login
+            return "unknown"
+        self.helper.request_code = pressed
+        result = self.make_with().run()
+        self.assertEqual(result.status, "login_error")
+        self.assertIn("the app shows: other", result.detail)
+        (entry,) = self.failure_log()
+        self.assertEqual((entry["status"], entry["screen"], entry["evidence"]), ("login_error", "other", "20261105-evidence.png"))
+        self.assertEqual(self.pictures, ["login-login_error"])
+
+    def test_no_digit_of_a_code_or_a_number_reaches_the_log(self):
+        self.helper.request_result = "unknown"
+        self.make_with().run()
+        (entry,) = self.failure_log()
+        self.assertNotRegex(entry["texts"], r"\d", "the texts of the screen may hold the number or a code")
+        self.assertIn("שלחו לי קוד", entry["texts"])
+
+    def test_an_unexpected_error_in_the_request_is_a_failed_login_with_evidence_not_a_crash(self):
+        self.helper.request_error = RuntimeError("no such element")
+        result = self.make_with().run()
+        self.assertEqual(result.status, "login_error")
+        self.assertIn("RuntimeError: no such element", result.detail)
+        self.assertEqual(len(self.failure_log()), 1)
+        self.assertEqual(result.retry_after, timedelta(minutes=45), "the request was counted")
+
+    def test_a_good_login_keeps_no_evidence(self):
+        self.inbox.script = [[(101, "123456")]]
+        self.assertTrue(self.make_with().run().ok)
+        self.assertEqual((self.failure_log(), self.pictures), ([], []))
+
+    def test_a_refusal_by_the_budget_keeps_no_picture(self):
+        self.inbox.script = [[(101, "123456")]]
+        self.make_with().run()
+        self.state["now"] = NOW + timedelta(minutes=10)
+        self.assertEqual(self.make_with().run().status, "budget")
+        self.assertEqual(self.pictures, [], "nothing was tried, so there is nothing to show")
+
+    def test_a_picture_that_cannot_be_taken_never_changes_the_result(self):
+        self.helper.request_result = "unknown"
+
+        def broken(label):
+            raise OSError("the screen tool failed")
+        result = self.make(evidence=broken, describe=lambda: "x").run()
+        self.assertEqual(result.status, "login_error")
+        (entry,) = self.failure_log()
+        self.assertIn("OSError", entry["evidence_error"])
 
 
 class NoSmsTests(AutoCase):

@@ -1268,6 +1268,101 @@ class OpeningWaitTests(AppCase):
         self.assertEqual(sum(self.sleeps), 20 * 60)
         self.assertNotIn(self.retry_time(), self.agents.armed)
 
+    # 2026-11-05: the automatic login was refused for seven hours (its budget of 24 hours was spent by two failed requests
+    # and one good login). Only the 5-minute retries were left; they were refused too, and they end after six. A login
+    # that is refused or has failed now arms one look for the minute the budget allows the next request.
+
+    def refuse_login(self, retry_after=timedelta(hours=7), label=LABEL):
+        from club_booking.autologin import AutoResult
+        from tests.test_login import LOGGED_IN, LOGIN
+        self.due_locked(label=label)
+        self.state["locked"] = False                                              # unlocked, but the app is logged out
+        self.refused_at, self.attempts = self.state["now"], []
+        self.screens, self.outcome = {"kind": LOGIN}, AutoResult("budget", "a code was asked for lately", retry_after=retry_after)
+        test = self
+
+        class Ax:
+            def dump(inner):
+                return test.screens["kind"]
+
+        class Auto:
+            def run(inner):
+                test.attempts.append(test.state["now"])
+                if test.outcome.ok:
+                    test.screens["kind"] = LOGGED_IN
+                return test.outcome
+        self.app.ax_factory = lambda: Ax()
+        self.app.cfg = replace(self.app.cfg, auto_login=True)
+        self.app.auto_login_factory = lambda attention: Auto()
+
+    def login_look_time(self, retry_after=timedelta(hours=7)):
+        from club_booking.cli import LOGIN_LOOK_MARGIN
+        return local_naive(self.refused_at + retry_after + LOGIN_LOOK_MARGIN)
+
+    def test_a_login_refused_by_its_budget_arms_a_look_for_the_minute_the_budget_ends(self):
+        self.refuse_login()
+        self.app.cmd_tick(False, False)
+        self.assertEqual(sum(self.sleeps), 20 * 60, "the agent still waits for a login by hand")
+        self.assertIn(self.login_look_time(), self.agents.synced[-1], "armed last, so no later arming removes it")
+        self.assertIn("login_look_armed", (self.tmp / "runs.jsonl").read_text())
+
+    def test_the_slow_tick_arms_the_login_look_without_waiting(self):
+        self.refuse_login(label="com.club-booking.tick")
+        self.app.cmd_tick(False, False)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn(self.login_look_time(), self.agents.synced[-1])
+
+    def test_a_failed_login_arms_a_look_for_the_minute_the_next_request_is_allowed(self):
+        from club_booking.autologin import AutoResult
+        self.refuse_login()
+        self.outcome = AutoResult("login_error", "the code screen did not appear", retry_after=timedelta(minutes=45))
+        self.app.cmd_tick(False, False)
+        self.assertIn(self.login_look_time(timedelta(minutes=45)), self.agents.synced[-1])
+
+    def test_no_five_minute_retry_is_armed_or_counted_while_the_budget_refuses(self):
+        from club_booking.cli import RETRY_ERRORED, RETRY_SOON
+        self.refuse_login()
+        self.app.cmd_tick(False, False)
+        end = self.state["now"]
+        for gap in (RETRY_SOON, RETRY_ERRORED):
+            self.assertNotIn(local_naive(end + gap), self.agents.synced[-1])
+        ident = next(o.ident for o in self.store.load_plan().openings if o.person == "alex" and o.name == "PowerGym")
+        self.assertEqual(self.store.bump_attempt(f"retry|{ident}"), 1, "the retries are not used up")
+
+    def test_the_look_at_that_minute_logs_in_and_books(self):
+        from club_booking.autologin import AutoResult
+        wait = timedelta(minutes=45)                                              # the 45-minute budget (a day later the plan is old)
+        self.refuse_login(retry_after=wait)
+        self.app.cmd_tick(False, False)
+        self.assertIn(self.login_look_time(wait), self.agents.synced[-1])
+        from club_booking.cli import LOGIN_LOOK_MARGIN
+        self.state["now"] = self.refused_at + wait + LOGIN_LOOK_MARGIN            # the armed look fires
+        self.outcome = AutoResult("logged_in")                                    # the budget allows it now
+        self.sleeps.clear()
+        self.app.cmd_tick(False, False)
+        self.assertEqual(len(self.attempts), 2)
+        self.assertIn(("alex", "2026-10-14T06:00|powergym"), self.fake.button_taps)
+
+    def test_a_refusal_without_a_retry_time_arms_no_login_look(self):
+        from club_booking.autologin import AutoResult
+        self.refuse_login()
+        self.outcome = AutoResult("no_access", "cannot read the Messages database")
+        self.app.cmd_tick(False, False)
+        self.assertNotIn("login_look_armed", (self.tmp / "runs.jsonl").read_text())
+
+    def test_no_login_look_is_armed_for_a_class_the_user_registered_by_hand(self):
+        self.refuse_login()
+        ident = next(o.ident for o in self.store.load_plan().openings if o.person == "alex" and o.name == "PowerGym")
+        self.store.mark_handled(ident)
+        self.app.rearm(login_look=self.login_look_time())
+        self.assertNotIn(self.login_look_time(), self.agents.armed)
+
+    def test_a_dry_run_makes_no_login_attempt_and_arms_no_login_look(self):
+        self.refuse_login()
+        self.app.cmd_tick(True, False)
+        self.assertEqual(self.attempts, [])
+        self.assertNotIn(self.login_look_time(), self.agents.armed)
+
 
 class DisplayHoldTests(AppCase):
     """2026-10-17/18: the display went dark about 30 seconds after the program woke it, in the middle of a run, and the

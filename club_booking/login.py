@@ -15,11 +15,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from .ax import AxError
 from .ax_reader import screen_kind
 
 FIELD = "מספר הטלפון שלך"
 SEND = "שלחו לי קוד"
 CLOSE = "סגור"
+SEND_LOOKS = 6                  # looks for the "send me a code" button at the press (a press that finds none presses nothing)
 
 
 class LoginError(Exception):
@@ -147,6 +149,24 @@ class LoginHelper:
             except Exception:
                 continue
 
+    def _press_send(self, send_y: int) -> None:
+        """Press "send me a code". 2026-11-05: a live login stopped with "no such element" here, after the request was
+        counted. A press that found no such button pressed nothing, so only that case looks again, a few times, with the
+        position of a fresh dump (the screen may be redrawing). Any other error may come after a press that happened:
+        it is raised at once, and a press that worked is never repeated."""
+        for attempt in range(SEND_LOOKS):
+            try:
+                self.ax.press("AXButton", SEND, send_y, 30)
+                return
+            except AxError as exc:
+                if "no such element" not in str(exc) or attempt == SEND_LOOKS - 1:
+                    raise
+            self.sleep(0.5)
+            try:
+                send_y = self._center(self.ax.dump(), SEND)
+            except LoginError:
+                pass                                         # not there yet: look again with the old position
+
     def request_code(self, phone: str) -> str:
         """Fill the phone number and press 'send me a code' ONCE. Returns code_screen, or unknown."""
         dump = self.ax.dump()
@@ -174,7 +194,7 @@ class LoginHelper:
         else:
             raise LoginError(f"the field shows {shown!r}, not the number: nothing was sent")
         self.guard.record_request(now)                      # written before the press
-        self.ax.press("AXButton", SEND, send_y, 30)          # exactly once, never repeated
+        self._press_send(send_y)                             # exactly once, never repeated
         after = self._wait_for(lambda kind: kind in ("code", "locked", "update"))
         if after == "code":
             return "code_screen"

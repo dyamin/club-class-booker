@@ -6,7 +6,7 @@ the Mac's Messages database (sms.py), and the risk is kept small by these rules:
 - it acts only on the login screen, and only when a class is waiting (the caller decides that);
 - it never asks for a code that it cannot read: the snapshot of the Messages database comes first, and a database that
   cannot be read means no request;
-- its own budget: one request in 45 minutes and three in 24 hours, written down BEFORE the request, on top of the
+- its own budget: one request in 45 minutes and five in 24 hours (see `budgets`), written down BEFORE the request, on top of the
   login guard of the app (2 requests in 10 minutes), which counts manual requests too;
 - one request per attempt, one code typed per request, never a second try: when no SMS arrives it stops and the phone is
   told why;
@@ -19,31 +19,47 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from .login import LoginBlocked, LoginError, LoginGuard
 from .sms import SmsError
 
 CODE_VALID = timedelta(minutes=5)          # the app's code is valid for 5 minutes
+HOUR_LIMIT, HOUR_WINDOW = 2, timedelta(minutes=45)   # LoginGuard keeps one request free: one automatic request per 45 minutes
+DAY_LIMIT, DAY_WINDOW = 6, timedelta(hours=24)       # five automatic requests a day (2026-11-05: it was three, and a day with two failed requests used all of it)
+
+
+def budgets(home: Path):
+    """The program's own login budget: (the 45-minute guard, the 24-hour guard). One place for the numbers."""
+    return (LoginGuard(Path(home) / "autologin-hour.json", HOUR_LIMIT, HOUR_WINDOW),
+            LoginGuard(Path(home) / "autologin-day.json", DAY_LIMIT, DAY_WINDOW))
 
 
 @dataclass(frozen=True)
 class AutoResult:
     status: str      # logged_in | not_login_screen | no_access | no_phone | budget | blocked | login_error | no_sms | bad_code | stale_code_screen
     detail: str = ""
+    retry_after: Optional[timedelta] = None     # when a request is allowed again (2026-11-05); the caller arms a look for it
 
     @property
     def ok(self) -> bool:
         return self.status == "logged_in"
 
 
-def _masked(text: str) -> str:
+def _masked(text: str, limit: int = 200) -> str:
     """The reason of a failure for the log: every digit becomes "#", so that no code and no phone number is kept
     (2026-10-17: a failure was logged without its reason, and nobody could tell what had gone wrong)."""
-    return re.sub(r"\d", "#", text)[:200]
+    return re.sub(r"\d", "#", text)[:limit]
+
+
+# The statuses after which the program may not ask again at once, and the ones after which a request was made and the
+# screen is worth a look (a refusal by the budget made no request, so there is nothing to show).
+RETRY_STATUSES = ("budget", "blocked", "login_error", "no_sms", "bad_code", "stale_code_screen")
+TRIED_STATUSES = ("login_error", "no_sms", "bad_code", "stale_code_screen")
+APP_LOCK = timedelta(minutes=10)               # the app locks the login for 10 minutes after too many requests
 
 
 def _minutes(wait: timedelta) -> int:
@@ -55,7 +71,12 @@ class AutoLogin:
                  phone: Callable[[], str], log: Callable[..., None], screen: Callable[[], str],
                  sleep: Callable[[float], None] = time.sleep,
                  now_fn: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                 wait: float = 120.0, poll: float = 4.0) -> None:
+                 wait: float = 120.0, poll: float = 4.0,
+                 evidence: Callable[[str], str] = lambda label: "",
+                 describe: Callable[[], str] = lambda: "") -> None:
+        """evidence(label) saves a picture of the screen and returns its file name; describe() returns the texts on the
+        screen. Both are used only after a failed attempt, and a failure of theirs never changes the result."""
+        self.evidence, self.describe = evidence, describe
         self.helper, self.inbox = helper, inbox
         self.hour_budget, self.day_budget, self.state_path = hour_budget, day_budget, Path(state_path)
         self.phone, self.log, self.screen, self.sleep, self.now_fn = phone, log, screen, sleep, now_fn
@@ -75,9 +96,43 @@ class AutoLogin:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(data), encoding="utf-8")
 
+    # -- after a failure ------------------------------------------------------------------------------------
+    def _next_request_in(self, status: str) -> Optional[timedelta]:
+        """How long until the program's own budget (and, after the app's lock, the app) allows the next request."""
+        now = self.now_fn()
+        waits = [w for w in (self.hour_budget.check(now), self.day_budget.check(now)) if w]
+        if status == "blocked":
+            waits.append(APP_LOCK)
+        return max(waits) if waits else None
+
+    def _keep_evidence(self, result: AutoResult) -> AutoResult:
+        """2026-11-05: two requests ended with "the code screen did not appear" and nobody could tell what the app showed.
+        Keep the screen type, the texts on the screen (every digit hidden) and a picture. Never raises."""
+        fields: dict = {"status": result.status}
+        try:
+            fields["screen"] = self.screen()
+        except Exception as exc:
+            fields["screen_error"] = type(exc).__name__
+        try:
+            fields["texts"] = _masked(self.describe(), 400)
+        except Exception as exc:
+            fields["texts_error"] = _masked(f"{type(exc).__name__}: {exc}")
+        try:
+            fields["evidence"] = self.evidence(f"login-{result.status}")
+        except Exception as exc:
+            fields["evidence_error"] = _masked(f"{type(exc).__name__}: {exc}")
+        self.log("auto_login_screen", **fields)
+        if result.status == "login_error" and fields.get("screen"):
+            return replace(result, detail=f"{result.detail}; the app shows: {fields['screen']}")
+        return result
+
     # -- the attempt --------------------------------------------------------------------------------------
     def run(self) -> AutoResult:
         result = self._run()
+        if result.status in TRIED_STATUSES:
+            result = self._keep_evidence(result)
+        if result.status in RETRY_STATUSES:
+            result = replace(result, retry_after=self._next_request_in(result.status))
         if result.ok or not result.detail:
             self.log("auto_login", status=result.status)         # never the code, the number or a message
         else:
@@ -117,6 +172,8 @@ class AutoLogin:
             return AutoResult("blocked", str(exc))
         except LoginError as exc:
             return AutoResult("login_error", str(exc))
+        except Exception as exc:                  # 2026-11-05: "AxError: no such element" ended a login as a crash, uncounted
+            return AutoResult("login_error", f"{type(exc).__name__}: {exc}")
         if shown != "code_screen":
             return AutoResult("login_error", "the code screen did not appear after the request")
         return self._wait_and_enter(now, snapshot)
