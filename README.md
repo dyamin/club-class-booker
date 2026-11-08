@@ -79,7 +79,7 @@ Away from the Mac? The phone reminder "the Mac is locked" names the person, the 
 | `Club booking: N to check` | A class that was **not booked** and needs you: refused by the club, the class is full and the waitlist was not joined, a tap failed, a person's run failed. Only these lines, never a `Booked:` line. |
 | `the Mac is locked` | **Action:** unlock it, a class is waiting (it is booked as soon as you unlock, and the program looks again about every 30 minutes until the class starts). One a day, naming the class. |
 | `the club app is logged out` / `needs an update` | **Action:** log in (with `auto_login` on, only when the automatic login failed, with the reason). At most **once a day**. |
-| `giving up for today` | A class was not booked after the retries: register by hand. |
+| `still failing` | A person's runs failed 3 times today (`max_person_failures`). **The program does not give up:** it tries again with longer waits (5, 10, 20, 40 minutes, then an hour) until the class starts. Register by hand if you cannot wait. One a day. (Until 2026-11-08 the third failure ended the day for that person: `giving up for today`; it cost a booking, and the class stays open for 24 hours.) |
 | `<name>'s answer was only partly applied`, `answer was not applied` | Your decision could not be carried out: do that part by hand. |
 | `Club booking problem` | The program itself broke (once a day). |
 

@@ -61,7 +61,9 @@ Run everything from the repo folder with the virtual environment: `.venv/bin/pyt
 
 **A class the user unregistered.** The program does not book that date again, and it deletes the calendar event it made, after two readings 30 minutes apart (`calendar_audit_removed` in the log). Never delete a calendar event by hand-made script: Calendar scripting cannot delete a repeating event (it does nothing, without an error), and the program's own delete refuses a series. The rules are in `club_booking/calendar_audit.py` (`remove_dropped`).
 
-**What the phone gets.** Only a decision (questions) or an action (a class not booked, the locked Mac, a logged-out app, giving up, a crash). Never a confirmation, a waitlist join, a calendar message or the wake-up test (the user's rule of 2026-10-15). Everything else is in `runs.jsonl`. Do not add a phone message for information.
+**A person whose runs fail.** (2026-11-08) The program never gives up on a class that is still open: after each failed run the next try waits longer (5, 10, 20, 40 minutes, then an hour; `failure_delay`), and a person whose run works starts from the short wait again. The phone is told once a day, at the third failure (`still failing`). Read `stuck_screen` and the picture in `evidence/` before you guess why a run failed.
+
+**What the phone gets.** Only a decision (questions) or an action (a class not booked, the locked Mac, a logged-out app, "still failing", a crash). Never a confirmation, a waitlist join, a calendar message or the wake-up test (the user's rule of 2026-10-15). Everything else is in `runs.jsonl`. Do not add a phone message for information.
 
 **Answers to questions.** The user answers on the iPhone by completing one reminder. The program acts on it the next time it wakes; `python -m club_booking answers` does it now.
 

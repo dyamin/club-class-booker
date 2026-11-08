@@ -1034,7 +1034,7 @@ class UserFirstTests(AppCase):
         due = (opening("alex", "PowerGym", NOW - timedelta(minutes=1)),)
         decision = TickDecision("run_due", ("alex",), due)
         for _ in range(5):
-            self.app._give_up_on_failing(decision, RunResult("r", [PersonResult("alex", error=USER_ACTIVE)], None, []))
+            self.app._count_failures(decision, RunResult("r", [PersonResult("alex", error=USER_ACTIVE)], None, []))
         self.assertEqual([k for k in self.attempts() if k.startswith("fail|")], [])
         self.assertEqual(self.store.handled(), set(), "the opening was not given up")
 
@@ -2145,21 +2145,55 @@ class TickTests(AppCase):
         due = tuple(o for o in self.store.load_plan().openings if o.person == "sam")
         failed = RunResult("r", [PersonResult("sam", error=WINDOW_HIDDEN)], None, [])
         for _ in range(6):
-            self.app._give_up_on_failing(TickDecision("run_due", ("sam",), due), failed)
+            self.app._count_failures(TickDecision("run_due", ("sam",), due), failed)
         self.assertEqual([t for t, _ in self.reporter.tells if "giving up" in t.lower()], [])
 
-    def test_a_person_that_keeps_failing_is_cut_off_and_reported_once(self):
+    def test_a_person_that_keeps_failing_is_never_given_up_on_and_told_once(self):
+        # 2026-11-08: three failures in eleven minutes ended the day for Alex, and the class stayed open for 24 hours
         self.build()
         self.due_for_sam()
         for _ in range(6):
             self.app.cmd_tick(False, False)
-        self.assertEqual(self.screen.used, self.cfg.max_person_failures, "no more runs after the cap")
-        giving_up = [t for t in self.reporter.tells if "giving up" in t[0].lower()]
-        self.assertEqual(len(giving_up), 1)
-        self.assertIn("Sam", giving_up[0][1])
+        self.assertEqual(self.screen.used, 6, "every wake-up tries again while the class is open")
+        still = [t for t in self.reporter.tells if "still failing" in t[0].lower()]
+        self.assertEqual(len(still), 1)
+        self.assertIn("Sam", still[0][1])
+        self.assertEqual([t for t in self.reporter.tells if "giving up" in t[0].lower()], [])
         self.assertEqual(len([t for t in self.reporter.tells if "Problem (Sam)" in t[1]]), 1,
                          "the same problem is told once a day")
-        self.assertEqual(self.store.handled(), {o.ident for o in self.store.load_plan().openings})
+        self.assertEqual(self.store.handled(), set(), "no opening is dropped")
+
+    def test_the_wait_before_the_next_try_grows_with_each_failure_up_to_an_hour(self):
+        self.build()
+        self.due_for_sam()
+        key = f"fail|sam|{NOW:%Y%m%d}"
+        for earlier, minutes in enumerate((5, 10, 20, 40, 60, 60)):
+            self.store.clear_attempt(key)
+            for _ in range(earlier):
+                self.store.bump_attempt(key)
+            self.app.rearm({"sam"})
+            self.assertIn(local_naive(NOW + timedelta(minutes=minutes)), self.agents.synced[-1],
+                          f"after {earlier + 1} failures: {minutes} minutes")
+
+    def test_a_retry_chain_of_a_failing_person_is_not_cut_after_six_retries(self):
+        self.build()
+        self.due_for_sam()
+        self.store.bump_attempt(f"fail|sam|{NOW:%Y%m%d}")
+        for _ in range(12):
+            self.app.rearm({"sam"})
+        self.assertEqual(len([t for t in self.agents.synced if local_naive(NOW + timedelta(minutes=10)) in t]), 12)
+
+    def test_a_person_who_works_again_starts_from_the_short_wait(self):
+        from club_booking.cli import TickDecision
+        self.build()
+        self.due_for_sam()
+        due = tuple(o for o in self.store.load_plan().openings if o.person == "sam")
+        decision = TickDecision("run_due", ("sam",), due)
+        key = f"fail|sam|{NOW:%Y%m%d}"
+        self.store.bump_attempt(key)
+        self.store.bump_attempt(key)
+        self.app._count_failures(decision, RunResult("r", [PersonResult("sam")], None, []))
+        self.assertEqual(self.store.attempt_count(key), 0)
 
     def test_a_failing_person_is_retried_in_five_minutes_not_in_one(self):
         # there is no timer any more: a retry is an agent armed for later, and it is the only way a failure is retried
@@ -2206,10 +2240,10 @@ class TickTests(AppCase):
         self.due_for_sam()
         for _ in range(6):
             self.app.cmd_tick(False, False)
-        self.assertEqual(self.screen.used, self.cfg.max_person_failures)
-        self.assertEqual(len(self.reporter.macs), self.cfg.max_person_failures, "the 'hands off the mouse' notices")
+        self.assertEqual(self.screen.used, 6, "no day-long give-up: each wake-up tries again")
+        self.assertEqual(len(self.reporter.macs), 6, "the 'hands off the mouse' notices")
         self.assertNotIn(local_naive(NOW + timedelta(minutes=1)), self.agents.armed)
-        self.assertEqual(len([t for t in self.reporter.tells if "giving up" in t[0].lower()]), 1)
+        self.assertEqual(len([t for t in self.reporter.tells if "still failing" in t[0].lower()]), 1)
         self.assertEqual(len([t for t in self.reporter.tells if t[0] == "Club booking problem"]), 1)
 
     def test_a_replan_is_tried_at_most_twice_a_day(self):
@@ -2306,16 +2340,17 @@ class LoggedOutTickTests(AppCase):
         o = next(x for x in self.store.load_plan().openings if x.person == "alex")
         decision = TickDecision("run_due", ("alex",), (o,))
         for error in (LOGGED_OUT, UPDATE_NEEDED, LOGGED_OUT, LOGGED_OUT, LOGGED_OUT):
-            self.app._give_up_on_failing(decision, RunResult("r", [PersonResult("alex", error=error)], None, []))
+            self.app._count_failures(decision, RunResult("r", [PersonResult("alex", error=error)], None, []))
         self.assertNotIn(o.ident, self.store.handled(), "the class is not dropped for a problem the user can fix")
 
-    def test_other_failures_still_end_in_giving_up(self):
+    def test_other_failures_are_told_but_never_end_in_giving_up(self):
         self.due()
         o = next(x for x in self.store.load_plan().openings if x.person == "alex")
         decision = TickDecision("run_due", ("alex",), (o,))
         for _ in range(3):
-            self.app._give_up_on_failing(decision, RunResult("r", [PersonResult("alex", error="ScreenError: boom")], None, []))
-        self.assertIn(o.ident, self.store.handled())
+            self.app._count_failures(decision, RunResult("r", [PersonResult("alex", error="ScreenError: boom")], None, []))
+        self.assertNotIn(o.ident, self.store.handled(), "the class is open for 24 hours: it is not dropped")
+        self.assertEqual(len([t for t, _ in self.reporter.tells if "still failing" in t.lower()]), 1)
 
 
 class AutoLoginTickTests(AppCase):

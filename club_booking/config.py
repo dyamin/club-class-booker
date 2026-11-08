@@ -70,7 +70,7 @@ class Config:
     countdown_seconds: int = 15
     max_open_retries: int = 5
     max_run_seconds: int = 1200
-    max_person_failures: int = 3      # failed runs per person per day before the program gives up for the day
+    max_person_failures: int = 3      # failed runs per person per day before the phone is told that it keeps failing (the program keeps trying: failure_delay)
     max_replans_per_day: int = 2      # how often a stale plan is rebuilt in one day
     replan_force_hours: int = 168     # a plan older than this is rebuilt even if the user is at the Mac (once a week)
     min_idle_seconds: float = 600.0   # the user must have been away this long before the program does anything non-urgent

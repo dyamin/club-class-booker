@@ -48,7 +48,14 @@ GRACE = timedelta(seconds=30)    # launchd may fire a few seconds before the cla
 AUDIT_MARGIN = timedelta(minutes=10)    # no calendar audit when a class opens sooner than this
 RETRY_SOON = timedelta(minutes=1)       # a class that should be open but is not: look again
 RETRY_ERRORED = timedelta(minutes=5)    # a run that failed (locked, logged out, a screen problem): try again
-MAX_RETRIES = 6                         # per opening: a class that never works does not keep a chain of agents alive
+MAX_RETRIES = 6                         # per opening, for a class that is not open yet: it does not keep a chain of agents alive
+RETRY_MAX = timedelta(minutes=60)       # the longest wait between two tries of a person whose runs fail (2026-11-08)
+
+
+def failure_delay(failures: int) -> timedelta:
+    """The wait before the next try of a person whose run failed: 5, 10, 20 and 40 minutes, then an hour, until the class
+    starts. 2026-11-08: three failures in eleven minutes ended the day for Alex, and the class stayed open for 24 hours."""
+    return min(RETRY_ERRORED * 2 ** (max(failures, 1) - 1), RETRY_MAX)
 OPENING_WAIT = 20 * 60                  # an opening agent waits this long for the user to unlock the Mac
 OPENING_POLL = 15                       # ... looking every 15 seconds
 LOCKED_RETRY = timedelta(minutes=10)    # the wait ended with the Mac still locked: look again this long after it (2026-11-04)
@@ -808,7 +815,8 @@ class App:
         three people, so the program wakes at each opening time and never before it. There is no timer.
 
         A class that is due but not booked (a failed run, a logged-out app) gets a retry agent a few minutes later, at
-        most MAX_RETRIES times; the failure counter (see _give_up_on_failing) ends it earlier.
+        most MAX_RETRIES times. After a failed run the wait before the next try grows with the day's failures of the person
+        (failure_delay: 5, 10, 20, 40 minutes, then an hour) and the chain goes on until the class starts (2026-11-08)
 
         locked=True: the wait for an unlock ended with the Mac still locked (2026-11-04: the class stayed unbooked for
         hours after the user came back). The class is open until it starts, so a look is armed LOCKED_RETRY later, and
@@ -850,9 +858,15 @@ class App:
                 at = local_naive(max(login_look, now + RETRY_SOON))
                 times.append(at)
                 self.store.log("login_look_armed", at=f"{at:%Y-%m-%d %H:%M}", due=[o.ident for o in leftover])
-        elif leftover and max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
-            failing = any(o.person in errored for o in leftover)
-            times.append(local_naive(now + (RETRY_ERRORED if failing else RETRY_SOON)))
+        elif leftover:
+            failing = [o for o in leftover if o.person in errored]
+            if failing:
+                failed_before = max(self.store.attempt_count(f"fail|{o.person}|{now:%Y%m%d}") for o in failing)
+                # a person who failed before has a chain that only grows its waits and ends when the class starts
+                if failed_before or max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
+                    times.append(local_naive(now + failure_delay(failed_before + 1)))
+            elif max(self.store.bump_attempt(f"retry|{o.ident}") for o in leftover) <= MAX_RETRIES:
+                times.append(local_naive(now + RETRY_SOON))
         if times:
             self.agents.sync_openings(times, self.running_label, local_now)
         else:
@@ -979,26 +993,28 @@ class App:
         self.store.log("tick", action="logged_out_wait", kind=kind, persons=list(decision.persons))
         return True
 
-    def _give_up_on_failing(self, decision: TickDecision, result: RunResult) -> None:
-        """A person whose run failed max_person_failures times today is left alone for the day: their due openings
-        count as handled and the user is told once. Without this, a failure that does not go away would make the
-        program run, and message, every few minutes."""
+    def _count_failures(self, decision: TickDecision, result: RunResult) -> None:
+        """Count the failed runs of each person today. A failure never ends the day for the person (2026-11-08: three failures
+        in eleven minutes dropped Alex's class, and it stayed open for 24 hours): the wait before the next try grows with
+        the count (see rearm and failure_delay), so that a failure that does not go away does not make the program run every
+        few minutes. The user is told once, when the count reaches max_person_failures. A person whose run worked starts again
+        from the short wait."""
         day = f"{self.now_fn():%Y%m%d}"
-        given_up: List[str] = []
+        still: List[str] = []
         for r in result.people:
-            if not r.error or r.error in (LOGGED_OUT, UPDATE_NEEDED, USER_ACTIVE, WINDOW_HIDDEN):
-                continue                       # a problem only the user can fix is not a reason to drop the class
-            if self.store.bump_attempt(f"fail|{r.person}|{day}") < self.cfg.max_person_failures:
+            if not r.error:
+                self.store.clear_attempt(f"fail|{r.person}|{day}")
                 continue
-            mine = [o for o in decision.due if o.person == r.person]
-            for o in mine:
-                self.store.mark_handled(o.ident)
-            if mine:
-                given_up.append(f"{self.cfg.person(r.person).first_name}: {r.error}")
-        if given_up:
-            self._tell_once("Club booking: giving up for today",
-                            "\n".join(given_up) + "\nThe classes that opened were not booked. "
-                            "Fix the problem, then run: python -m club_booking run")
+            if r.error in (LOGGED_OUT, UPDATE_NEEDED, USER_ACTIVE, WINDOW_HIDDEN):
+                continue                       # a problem only the user can fix is no failure of the program
+            if self.store.bump_attempt(f"fail|{r.person}|{day}") != self.cfg.max_person_failures:
+                continue
+            if any(o.person == r.person for o in decision.due):
+                still.append(f"{self.cfg.person(r.person).first_name}: {r.error}")
+        if still:
+            self._tell_once("Club booking: still failing",
+                            "\n".join(still) + "\nThe program keeps trying, with longer waits, until the class starts. "
+                            "Or register by hand.")
 
     # -- commands ------------------------------------------------------------------------------
     def cmd_run(self, keys: Sequence[str], dry_run: bool, countdown: bool) -> int:
@@ -1135,7 +1151,7 @@ class App:
             failed = RunResult("failed", [PersonResult(p.key, error=f"{type(exc).__name__}: {exc}") for p in persons])
             code = self._tick_crashed(exc, {p.key for p in persons})
             try:
-                self._give_up_on_failing(decision, failed)
+                self._count_failures(decision, failed)
             except Exception:
                 pass
             return code
@@ -1143,7 +1159,7 @@ class App:
             if decision.action == "replan":
                 self.store.drop_attempt(f"replan|{now:%Y%m%d}")      # standing back does not use up a refresh
             return 0
-        self._give_up_on_failing(decision, result)
+        self._count_failures(decision, result)
         if decision.action == "run_due" and not waited:
             self._refresh_plan_when_quiet()
         return 0
