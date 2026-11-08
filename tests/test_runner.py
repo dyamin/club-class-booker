@@ -272,6 +272,23 @@ class StuckAppTests(RunnerCase):
         self.assertIn("could not switch", result.people[0].error)
         self.assertEqual(self.app.button_taps, [])
 
+    def test_a_stuck_app_keeps_a_picture_and_a_log_entry_of_what_it_showed(self):
+        # 2026-11-08: a run failed three times with "the person selector did not close" and nothing showed what the app displayed
+        runner = self.build(restart_app=True, fixes=False, mode="stuck")
+        runner.run([self.cfg.person("alex")])
+        self.assertTrue(list((self.tmp / "evidence").glob("*alex-stuck*.png")), "a picture of the window")
+        entries = [json.loads(line) for line in (self.tmp / "runs.jsonl").read_text().splitlines()
+                   if '"stuck_screen"' in line]
+        self.assertEqual(len(entries), 2, "once before the restart and once before the failure is reported")
+        self.assertIn("could not switch", entries[0]["error"])
+        self.assertIn("rows", entries[0])
+
+    def test_a_picture_that_cannot_be_taken_does_not_change_a_stuck_run(self):
+        runner = self.build(restart_app=True, fixes=False, mode="stuck")
+        self.app.region_png = lambda: (_ for _ in ()).throw(OSError("screencapture failed"))
+        result = runner.run([self.cfg.person("alex")])
+        self.assertIn("could not switch", result.people[0].error)
+
     def test_a_login_screen_is_reported_and_never_restarted(self):
         runner = self.build(restart_app=True, mode="login")
         result = runner.run(list(self.cfg.people))

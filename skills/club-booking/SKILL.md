@@ -32,7 +32,7 @@ Run everything from the repo folder with the virtual environment: `.venv/bin/pyt
 |---|---|
 | Is everything set up? | `python -m club_booking doctor` (every line must say OK) |
 | Plan, next opening, armed wake-ups | `python -m club_booking status` |
-| What the last runs did | `tail ~/Library/Application\ Support/club-booking/runs.jsonl` (events: `tick`, `run`, `person_failed`, `logged_out`, `stood_back`, `calendar_audit_*` (`_added`, `_removed`, `_failed`), `locked_retry_armed`, `login_look_armed`, `auto_login_screen`, `app_update`, `app_update_skipped`, `app_update_failed`, `app_restart`, `question_*`) |
+| What the last runs did | `tail ~/Library/Application\ Support/club-booking/runs.jsonl` (events: `tick`, `run`, `person_failed`, `logged_out`, `stood_back`, `calendar_audit_*` (`_added`, `_removed`, `_failed`), `locked_retry_armed`, `login_look_armed`, `auto_login_screen`, `app_update`, `app_update_skipped`, `app_update_failed`, `app_restart`, `stuck_screen` (a stuck run: with a picture `evidence/...-stuck.png`), `question_*`) |
 | What the program booked, joined, cancelled | `bookings.jsonl` in the same folder (`attempted`, `confirmed`, `waitlisted`, `cancel_attempted`, `cancelled`) |
 | Pictures of each confirmation | `evidence/` in the same folder |
 | What the phone was told | the Reminders list "Club bookings" |

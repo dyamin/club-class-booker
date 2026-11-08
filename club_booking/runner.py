@@ -17,7 +17,7 @@ from .config import Config, Person
 from .models import CardState, ClassCard, normalize_name
 from .osa import AppleScriptError
 from .ocr import OcrError
-from .pixels import PixelError, band_changed, blue_at, looks_like_selector, refine_button_center, selected_row
+from .pixels import PixelError, band_changed, blue_at, looks_like_selector, refine_button_center, row_kinds, selected_row
 from .planner import Opening, Plan, openings_from_cards
 from .screen import ScreenError
 from .state import Store
@@ -624,6 +624,27 @@ class Runner:
         except Exception as exc:
             self.store.log("popup_not_closed", run_id=self.run_id, error=f"{type(exc).__name__}: {exc}")
 
+    def _keep_stuck_evidence(self, person: Person, exc: Exception) -> None:
+        """2026-11-08: a run failed three times with "the person selector did not close" and nothing showed what the app
+        displayed. Keep a picture of the window, the window as the screen tool sees it, and what the selector check saw.
+        Never raises."""
+        self._save_window_picture(f"{person.key}-stuck")
+        fields: dict = {"error": str(exc)[:200]}
+        try:
+            fields["rows"] = row_kinds(self.screen.screenshot(), self.rows, self.cfg.coords.selector_row_x)
+        except Exception as err:
+            fields["rows_error"] = type(err).__name__
+        try:
+            fields["window"] = self.screen.status().strip()[:160]
+        except Exception:
+            pass
+        try:
+            if self.club_app is not None:
+                fields["windows"] = self.club_app.describe_windows()
+        except Exception:
+            pass
+        self.store.log("stuck_screen", run_id=self.run_id, person=person.key, **fields)
+
     def _save_window_picture(self, label: str) -> None:
         """Evidence of what the window looked like when a step failed (pop-up menus included). Never raises."""
         try:
@@ -763,6 +784,7 @@ class Runner:
                     self.go_to_favorites()
                     cards, pick = self._scan_once_more(person, skip)
                 except StuckError as exc:
+                    self._keep_stuck_evidence(person, exc)
                     if self.club_app is None:
                         raise
                     kind = self._screen_kind()

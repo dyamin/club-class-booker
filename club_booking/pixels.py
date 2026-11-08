@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from typing import Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageChops
 
@@ -42,6 +42,12 @@ def _row_kind(img: Image.Image, y: int, x: int) -> str:
     if sum(1 for c in colors if min(c) >= 240) >= need:
         return "white"
     return "other"
+
+
+def row_kinds(png: bytes, rows_y: Sequence[int], x: int) -> List[str]:
+    """blue, white or other for each row, for the log (2026-11-08: what the selector looked like when it would not close)."""
+    img = _open(png)
+    return [_row_kind(img, y, x) for y in rows_y]
 
 
 def selected_row(png: bytes, rows_y: Sequence[int], x: int) -> Optional[int]:
